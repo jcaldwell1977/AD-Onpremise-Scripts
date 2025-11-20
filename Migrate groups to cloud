@@ -1,0 +1,68 @@
+# Import the Exchange Online PowerShell module
+Import-Module ExchangeOnlineManagement
+
+# Connect to Exchange Online
+Connect-ExchangeOnline -ShowProgress $true
+
+# Path to the CSV file
+$csvPath = "C:\pathtocsv" # Update this to the actual path of your CSV file
+
+# Import the CSV file
+$groups = Import-Csv -Path $csvPath
+
+# Group the data by GroupName to process each distribution group
+$groupedData = $groups | Group-Object -Property GroupName
+
+foreach ($group in $groupedData) {
+    $groupName = $group.Name
+    $groupEmail = ($group.Group | Select-Object -First 1).GroupEmail
+    $groupType = ($group.Group | Select-Object -First 1).GroupType
+    $groupScope = ($group.Group | Select-Object -First 1).GroupScope
+
+    # Determine the group type for creation
+    $exchangeGroupType = if ($groupType -eq "Security (Mail-Enabled)") { "Security" } else { "Distribution" }
+
+    # Check if the group already exists
+    $existingGroup = Get-DistributionGroup -Identity $groupEmail -ErrorAction SilentlyContinue
+
+    if ($null -eq $existingGroup) {
+        # Create the distribution or mail-enabled security group
+        try {
+            New-DistributionGroup -Name $groupName `
+                                 -PrimarySmtpAddress $groupEmail `
+                                 -Type $exchangeGroupType `
+                                 -MemberJoinRestriction Closed `
+                                 -MemberDepartRestriction Closed `
+                                 -ErrorAction Stop
+            Write-Host "Created $exchangeGroupType group: $groupName ($groupEmail)" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "Failed to create $exchangeGroupType group: $groupName. Error: $_" -ForegroundColor Red
+            continue
+        }
+    }
+    else {
+        Write-Host "$exchangeGroupType group $groupName ($groupEmail) already exists." -ForegroundColor Yellow
+    }
+
+    # Get the members for the group
+    $members = $group.Group | Where-Object { $_.UserEmail } | Select-Object -ExpandProperty UserEmail
+
+    # Add members to the group
+    foreach ($member in $members) {
+        try {
+            Add-DistributionGroupMember -Identity $groupEmail `
+                                       -Member $member `
+                                       -ErrorAction Stop
+            Write-Host "Added $member to group $groupName" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "Failed to add $member to group $groupName. Error: $_" -ForegroundColor Red
+        }
+    }
+}
+
+# Disconnect from Exchange Online
+Disconnect-ExchangeOnline -Confirm:$false
+
+Write-Host "Script execution completed." -ForegroundColor Cyan
