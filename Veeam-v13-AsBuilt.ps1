@@ -204,7 +204,7 @@ $BackupJobs  = @(); try { $BackupJobs = @(Get-VBRJob -WarningAction SilentlyCont
 $CopyJobs    = @(); try { $CopyJobs   = @(Get-VBRBackupCopyJob -WarningAction SilentlyContinue) } catch { try { $CopyJobs = @(Get-VBRJob -WarningAction SilentlyContinue | Where-Object { $_.JobType -eq 'BackupSync' }) } catch { } }
 $ReplJobs    = @(); try { $ReplJobs   = @(Get-VBRJob -WarningAction SilentlyContinue | Where-Object { $_.JobType -in @('Replica','SimpleTransactionLog') }) } catch { }
 $AllJobs     = @($BackupJobs) + @($CopyJobs) + @($ReplJobs)
-$NasJobs     = @(); try { $NasJobs     = @(Get-VBRNASBackupJob) }         catch { }
+$NasJobs     = @(); try { $NasJobs     = @(Get-VBRUnstructuredBackupJob -WarningAction SilentlyContinue) } catch { try { $NasJobs = @(Get-VBRNASBackupJob -WarningAction SilentlyContinue) } catch { } }
 $TapeJobs    = @(); try { $TapeJobs    = @(Get-VBRTapeJob) }              catch { }
 $ViProxies   = @(); try { $ViProxies   = @(Get-VBRViProxy) }             catch { }
 $HvProxies   = @(); try { $HvProxies   = @(Get-VBRHvProxy) }             catch { }
@@ -227,14 +227,18 @@ $NotifOpts   = $null; try { $NotifOpts = Get-VBRNotificationOptions }    catch {
 $EmailOpts   = $null; try { $EmailOpts = Get-VBREmailOptions }           catch { }
 
 # Build backup copy job audit records
-# Use Get-VBRBackupCopyJobSession for jobs fetched via Get-VBRBackupCopyJob
+# Get-VBRBackupSession is the correct v13 cmdlet for copy job sessions
 $CopyJobAudit = $CopyJobs | ForEach-Object {
     $j = $_
     $last = $null
-    try { $last = Get-VBRBackupCopyJobSession -Job $j -Last 1 -ErrorAction SilentlyContinue } catch { }
-    if (-not $last) { try { $last = Get-VBRJobSession -Job $j -Last 1 -ErrorAction SilentlyContinue } catch { } }
-    $srcRepo = $null; try { $srcRepo = ($j.GetSourceRepository()).Name } catch { $srcRepo = 'N/A' }
-    $tgtRepo = $null; try { $tgtRepo = $j.GetTargetRepository().Name   } catch { $tgtRepo = 'N/A' }
+    # Get sessions by job name - Get-VBRBackupSession is the correct v13 cmdlet
+    $jobSessions = $null
+    try { $jobSessions = Get-VBRBackupSession | Where-Object { $_.JobName -like "$($j.Name)*" } | Sort-Object CreationTime -Descending } catch { }
+    if ($jobSessions) { $last = $jobSessions | Select-Object -First 1 }
+    # Fallback: use FindLastSession() method directly on the job object
+    if (-not $last) { try { $last = $j.FindLastSession() } catch { } }
+    $srcRepo = 'N/A'; try { $srcRepo = ($j.GetSourceRepository()).Name } catch { }
+    $tgtRepo = 'N/A'; try { $tgtRepo = $j.GetTargetRepository().Name   } catch { }
     $lastResult = 'No Sessions'
     $lastRun    = 'Never'
     $xferGB     = 0
@@ -478,26 +482,39 @@ if ($NasProxies.Count -gt 0) {
 if ($Repos.Count -gt 0) {
     $repoData = $Repos | ForEach-Object {
         $repo = $_
-        # Try GetContainer() first for live capacity data, fall back to properties
+        # Use Info.CachedTotalSpace/CachedFreeSpace - v13 documented properties
         $totalGB = 'N/A'
         $freeGB  = 'N/A'
-        $pct     = 'N/A'
         $usedGB  = 'N/A'
+        $pct     = 'N/A'
         try {
-            $container = $repo.GetContainer()
-            if ($container -and $container.CachedTotalSpace.InGigabytes -gt 0) {
-                $totalGB = [math]::Round($container.CachedTotalSpace.InGigabytes, 1)
-                $freeGB  = [math]::Round($container.CachedFreeSpace.InGigabytes, 1)
+            # Method 1: Info object cached properties (most reliable in v13)
+            $info = $repo.GetRepositoryInfo()
+            if ($info -and $info.CachedTotalSpace -gt 0) {
+                $totalGB = [math]::Round($info.CachedTotalSpace / 1GB, 1)
+                $freeGB  = [math]::Round($info.CachedFreeSpace  / 1GB, 1)
                 $usedGB  = [math]::Round($totalGB - $freeGB, 1)
                 $pct     = [math]::Round(($freeGB / $totalGB) * 100, 1)
             }
         } catch { }
-        # Fallback to direct properties if container returned zeros
-        if ($totalGB -eq 'N/A' -or $totalGB -eq 0) {
+        if ($totalGB -eq 'N/A') {
             try {
+                # Method 2: Direct TotalSpace/FreeSpace bytes properties
                 if ($repo.TotalSpace -gt 0) {
                     $totalGB = [math]::Round($repo.TotalSpace / 1GB, 1)
                     $freeGB  = [math]::Round($repo.FreeSpace  / 1GB, 1)
+                    $usedGB  = [math]::Round($totalGB - $freeGB, 1)
+                    $pct     = [math]::Round(($freeGB / $totalGB) * 100, 1)
+                }
+            } catch { }
+        }
+        if ($totalGB -eq 'N/A') {
+            try {
+                # Method 3: GetContainer() as last resort
+                $c = $repo.GetContainer()
+                if ($c -and $c.CachedTotalSpace.InBytes -gt 0) {
+                    $totalGB = [math]::Round($c.CachedTotalSpace.InBytes / 1GB, 1)
+                    $freeGB  = [math]::Round($c.CachedFreeSpace.InBytes  / 1GB, 1)
                     $usedGB  = [math]::Round($totalGB - $freeGB, 1)
                     $pct     = [math]::Round(($freeGB / $totalGB) * 100, 1)
                 }
@@ -638,9 +655,13 @@ if ($CopyJobs.Count -gt 0) {
     foreach ($job in $CopyJobs) {
         $opts     = $null; try { $opts     = $job.GetOptions()    } catch { }
         $sched    = $null; try { $sched    = $job.ScheduleOptions } catch { }
+        # Get-VBRBackupSession by name is the correct v13 approach for copy job sessions
         $sessions = @()
-        try { $sessions = @(Get-VBRBackupCopyJobSession -Job $job -Last 5 -ErrorAction SilentlyContinue) } catch { }
-        if ($sessions.Count -eq 0) { try { $sessions = @(Get-VBRJobSession -Job $job -Last 5 -ErrorAction SilentlyContinue) } catch { } }
+        try {
+            $sessions = @(Get-VBRBackupSession | Where-Object { $_.JobName -like "$($job.Name)*" } | Sort-Object CreationTime -Descending | Select-Object -First 5)
+        } catch { }
+        # Fallback: FindLastSession on the job object
+        if ($sessions.Count -eq 0) { try { $fl = $job.FindLastSession(); if ($fl) { $sessions = @($fl) } } catch { } }
 
         $badge   = if ($job.IsScheduleEnabled) { "<span class='badge b-ok'>Enabled</span>" } else { "<span class='badge b-neu'>Disabled</span>" }
         $srcRepo = try { ($job.GetSourceRepository()).Name } catch { 'N/A' }
