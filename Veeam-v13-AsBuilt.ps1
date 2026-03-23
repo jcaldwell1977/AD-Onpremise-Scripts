@@ -1,1546 +1,878 @@
 # =============================================================================
-# VEEAM BACKUP & REPLICATION v13 - AS-BUILT REPORT GENERATOR
-# Version 3.0 | Redesign Group Branded | Full Coverage
-#
-# Produced by The Redesign Group - Global Technology & Cybersecurity Consulting
+# VEEAM BACKUP & REPLICATION v13 - FULL AS-BUILT REPORT GENERATOR
+# Produced by The Redesign Group - Technology & Cybersecurity Consulting
 # https://redesign-group.com | Data Protection Practice
-#
+# Version 3.1 | Includes Backup Copy Job Audit + IP Resolution
+# =============================================================================
 # Usage:
 #   pwsh -File Veeam-v13-AsBuilt-Redesign.ps1
-#   pwsh -File Veeam-v13-AsBuilt-Redesign.ps1 -OutputPath "D:\Reports" -HealthCheck
-#   pwsh -File Veeam-v13-AsBuilt-Redesign.ps1 -CustomerName "Acme Corp" -HealthCheck
-#
-# Requirements:
-#   - PowerShell 7.2+
-#   - Veeam Backup & Replication v13 Console installed on this machine
-#   - Veeam.Backup.PowerShell module (auto-loaded by Veeam installer)
-#   - Run as a user with Veeam Backup Administrator role
+#   pwsh -File Veeam-v13-AsBuilt-Redesign.ps1 -CustomerName "Isuzu" -HealthCheck
 # =============================================================================
-
-#Requires -Version 7.2
 
 param(
     [string]$OutputPath   = "C:\AsBuiltReports",
-    [string]$ReportTitle  = "Veeam Backup & Replication v13 - As-Built Report",
-    [string]$CustomerName = "Customer",          # Client/customer name shown in header
+    [string]$ReportName   = "Veeam-v13-AsBuilt-Report",
+    [string]$CustomerName = "Customer",
     [string]$PreparedBy   = "The Redesign Group",
-    [switch]$HealthCheck,
-    [switch]$SkipJobDetails
+    [switch]$IncludeDiagrams,
+    [switch]$HealthCheck
 )
 
-# ─── 0. ENVIRONMENT GUARD ────────────────────────────────────────────────────
+if ($PSVersionTable.PSVersion.Major -lt 7) { throw "Run in PowerShell 7 (pwsh.exe) for Veeam v13" }
+Import-Module Veeam.Backup.PowerShell -ErrorAction SilentlyContinue
 
-Write-Host "⏳  Loading Veeam PowerShell module..." -ForegroundColor Cyan
-try {
-    Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
-} catch {
-    Write-Error "Cannot load Veeam.Backup.PowerShell module. Ensure the Veeam B&R Console is installed on this machine.`n$_"
-    exit 1
-}
+$ReportDate = Get-Date -Format "yyyy-MM-dd HH:mm"
 
-$VeeamModule = Get-Module Veeam.Backup.PowerShell
-Write-Host "✅  Module loaded: $($VeeamModule.Version)" -ForegroundColor Green
-
-# ─── 1. HELPERS ──────────────────────────────────────────────────────────────
-
-$ReportDate    = Get-Date -Format "dddd, dd MMMM yyyy HH:mm"
-$ReportDateISO = Get-Date -Format "yyyyMMdd-HHmm"
-$Warnings      = [System.Collections.Generic.List[string]]::new()
-
-function ConvertTo-HtmlTable {
-    param(
-        [Parameter(ValueFromPipeline)]$InputObject,
-        [string[]]$Properties,
-        [string]$EmptyMessage = "No data found."
-    )
-    begin   { $rows = [System.Collections.Generic.List[object]]::new() }
-    process { if ($null -ne $InputObject) { foreach ($item in $InputObject) { $rows.Add($item) } } }
-    end {
-        if ($rows.Count -eq 0) { return "<p class='empty'>$EmptyMessage</p>" }
-        $sel = if ($Properties) { $rows | Select-Object $Properties } else { $rows }
-        ($sel | ConvertTo-Html -Fragment) -replace '<!DOCTYPE[^>]*>', '' -replace '<html>|</html>|<body>|</body>|<head>|</head>', ''
-    }
-}
-
-function Get-StatusBadge {
-    param([string]$Status)
-    $map = @{
-        'Success'  = 'badge-success'
-        'Warning'  = 'badge-warn'
-        'Failed'   = 'badge-fail'
-        'Running'  = 'badge-info'
-        'None'     = 'badge-neutral'
-        'Disabled' = 'badge-neutral'
-        'Valid'    = 'badge-success'
-        'Invalid'  = 'badge-fail'
-        'Expired'  = 'badge-fail'
-    }
-    $cls = $map[$Status]; if (-not $cls) { $cls = 'badge-neutral' }
-    return "<span class='badge $cls'>$Status</span>"
-}
-
-function Add-HealthWarning { param([string]$Message); $script:Warnings.Add($Message) }
-
-# Resolve IP address for a given hostname (returns IP string or 'Unresolvable')
+# Resolve a hostname to its IPv4 address
 function Resolve-HostIP {
     param([string]$Hostname)
     if ([string]::IsNullOrWhiteSpace($Hostname)) { return 'N/A' }
     try {
-        $result = [System.Net.Dns]::GetHostAddresses($Hostname) |
-                  Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
-                  Select-Object -First 1
-        if ($result) { return $result.IPAddressToString } else { return 'Unresolvable' }
+        $r = [System.Net.Dns]::GetHostAddresses($Hostname) |
+             Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+             Select-Object -First 1
+        if ($r) { return $r.IPAddressToString } else { return 'Unresolvable' }
     } catch { return 'Unresolvable' }
 }
 
-# ─── 2. CSS / JS ─────────────────────────────────────────────────────────────
-
-$CSS = @'
+# =============================================================================
+# CSS - Redesign Group brand palette
+# Dark background, teal/green accent, Syne + DM Mono typography
+# =============================================================================
+$CSS = @"
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
-
-/* ── Redesign Group Brand Tokens ── */
 :root {
-    /* Core palette - derived from redesign-group.com */
-    --rg-black:       #0a0a0a;
-    --rg-dark:        #111111;
-    --rg-dark-2:      #181818;
-    --rg-dark-3:      #222222;
-    --rg-border:      #2a2a2a;
-    --rg-border-lt:   #333333;
+    --rg-black:#0a0a0a; --rg-dark:#111111; --rg-dark2:#181818; --rg-dark3:#222222;
+    --rg-border:#2a2a2a; --rg-borderl:#333333;
+    --rg-teal:#00c4a0; --rg-green:#4ade80; --rg-accent:#00c4a0;
+    --rg-glow:rgba(0,196,160,0.14);
+    --rg-text:#f0f0f0; --rg-text2:#a0a0a0; --rg-text3:#555555;
+    --success:#4ade80; --warn:#fbbf24; --fail:#f87171; --info:#60a5fa; --veeam:#00b4d8;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'DM Sans',Arial,sans-serif;background:var(--rg-black);color:var(--rg-text);font-size:13px;line-height:1.65;-webkit-font-smoothing:antialiased;}
+.accent-bar{height:3px;background:linear-gradient(90deg,#00c4a0 0%,#4ade80 100%);}
+/* Header */
+.rg-header{background:var(--rg-dark);border-bottom:1px solid var(--rg-border);padding:44px 60px 36px;position:relative;overflow:hidden;}
+.rg-header::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 55% 80% at 85% 50%,rgba(0,196,160,0.07) 0%,transparent 70%),radial-gradient(ellipse 35% 60% at 10% 30%,rgba(74,222,128,0.04) 0%,transparent 60%);pointer-events:none;}
+.rg-header::after{content:'';position:absolute;inset:0;background-image:radial-gradient(circle,rgba(255,255,255,0.035) 1px,transparent 1px);background-size:24px 24px;pointer-events:none;}
+.header-inner{position:relative;z-index:1;display:flex;justify-content:space-between;align-items:flex-start;gap:32px;flex-wrap:wrap;}
+.header-left{display:flex;flex-direction:column;gap:18px;}
+.rg-wordmark{display:flex;flex-direction:column;gap:2px;}
+.rg-wordmark .mark{font-family:'Syne',Arial,sans-serif;font-weight:800;font-size:13px;letter-spacing:3px;text-transform:uppercase;color:var(--rg-accent);}
+.rg-wordmark .sub{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--rg-text2);}
+.chip-row{display:flex;gap:8px;flex-wrap:wrap;}
+.chip{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 10px;border-radius:2px;border:1px solid;}
+.chip-v{color:var(--veeam);border-color:rgba(0,180,216,0.4);background:rgba(0,180,216,0.06);}
+.chip-rg{color:var(--rg-accent);border-color:rgba(0,196,160,0.4);background:rgba(0,196,160,0.06);}
+.chip-ab{color:var(--rg-text2);border-color:var(--rg-borderl);background:transparent;}
+.report-title{font-family:'Syne',Arial,sans-serif;font-weight:700;font-size:26px;letter-spacing:-0.3px;color:var(--rg-text);line-height:1.15;}
+.header-meta{font-family:'DM Mono',monospace;font-size:11px;color:var(--rg-text2);display:flex;flex-wrap:wrap;gap:6px 20px;}
+.header-meta span::before{content:'';display:inline-block;width:4px;height:4px;border-radius:50%;background:var(--rg-accent);margin-right:6px;vertical-align:middle;}
+.header-right{display:flex;flex-direction:column;gap:6px;align-items:flex-end;text-align:right;}
+.cust-label{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--rg-text3);}
+.cust-name{font-family:'Syne',Arial,sans-serif;font-size:20px;font-weight:700;color:var(--rg-text);}
+.prep-by{font-family:'DM Mono',monospace;font-size:10px;color:var(--rg-text2);}
+/* Layout */
+.layout{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 200px);}
+/* TOC */
+.toc{background:var(--rg-dark);border-right:1px solid var(--rg-border);padding:24px 0;position:sticky;top:0;height:100vh;overflow-y:auto;}
+.toc-title{padding:0 18px 14px;border-bottom:1px solid var(--rg-border);margin-bottom:10px;font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--rg-text3);}
+.toc a{display:flex;align-items:center;gap:10px;color:var(--rg-text2);text-decoration:none;padding:7px 18px;font-size:12px;border-left:2px solid transparent;transition:all 0.15s;}
+.toc a:hover{color:var(--rg-text);background:rgba(255,255,255,0.03);border-left-color:var(--rg-borderl);}
+.toc a.active{color:var(--rg-accent);background:var(--rg-glow);border-left-color:var(--rg-accent);}
+.toc a .tn{font-family:'DM Mono',monospace;font-size:9px;color:var(--rg-text3);width:18px;flex-shrink:0;}
+.toc a.active .tn{color:var(--rg-accent);}
+/* Main */
+.main-content{padding:36px 52px;}
+/* Section */
+.section{margin-bottom:40px;scroll-margin-top:20px;background:var(--rg-dark2);border:1px solid var(--rg-border);border-radius:6px;overflow:hidden;}
+.section-head{display:flex;align-items:center;gap:12px;padding:14px 20px;background:var(--rg-dark3);border-bottom:1px solid var(--rg-border);}
+.sec-num{font-family:'DM Mono',monospace;font-size:9px;color:var(--rg-accent);background:var(--rg-glow);border:1px solid rgba(0,196,160,0.25);width:26px;height:26px;border-radius:4px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.section-head h2{font-family:'Syne',Arial,sans-serif;font-size:16px;font-weight:700;color:var(--rg-text);}
+.section-body{padding:20px;}
+.subsection{margin-bottom:22px;}
+.subsection h3{font-family:'DM Sans',Arial,sans-serif;font-size:10px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:var(--rg-text2);margin-bottom:10px;display:flex;align-items:center;gap:10px;}
+.subsection h3::after{content:'';flex:1;height:1px;background:var(--rg-border);}
+/* Tables */
+.tw{overflow-x:auto;border-radius:4px;border:1px solid var(--rg-border);}
+table{width:100%;border-collapse:collapse;font-size:12px;font-family:'DM Mono',monospace;background:var(--rg-dark2);}
+th{background:var(--rg-dark3);color:var(--rg-text3);font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:9px 12px;text-align:left;border-bottom:1px solid var(--rg-border);white-space:nowrap;}
+td{padding:8px 12px;border-bottom:1px solid var(--rg-border);color:var(--rg-text);vertical-align:top;word-break:break-word;max-width:360px;}
+tr:last-child td{border-bottom:none;}
+tr:hover td{background:rgba(255,255,255,0.015);}
+td.ip{color:var(--rg-accent);font-weight:500;}
+/* Summary cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:12px;margin-bottom:28px;}
+.card{background:var(--rg-dark2);border:1px solid var(--rg-border);border-radius:6px;padding:18px 14px 14px;position:relative;overflow:hidden;}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#00c4a0,#4ade80);opacity:0.7;}
+.card .val{font-family:'Syne',Arial,sans-serif;font-size:32px;font-weight:800;color:var(--rg-text);line-height:1;}
+.card .lbl{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--rg-text3);margin-top:7px;}
+/* Badges */
+.badge{display:inline-block;font-family:'DM Mono',monospace;font-size:9px;padding:2px 8px;border-radius:2px;letter-spacing:0.5px;text-transform:uppercase;border:1px solid;}
+.b-ok{background:rgba(74,222,128,0.08);color:#4ade80;border-color:rgba(74,222,128,0.3);}
+.b-warn{background:rgba(251,191,36,0.08);color:#fbbf24;border-color:rgba(251,191,36,0.3);}
+.b-fail{background:rgba(248,113,113,0.08);color:#f87171;border-color:rgba(248,113,113,0.3);}
+.b-neu{background:rgba(96,96,96,0.12);color:#888;border-color:#333;}
+/* Health banner */
+.hbanner{background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.25);border-left:3px solid #f87171;border-radius:4px;padding:16px 20px;margin-bottom:20px;}
+.hbanner h3{color:#f87171;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;}
+.hbanner ul{padding-left:18px;}
+.hbanner li{color:#f87171;font-size:12px;margin-bottom:4px;font-family:'DM Mono',monospace;}
+/* Copy job audit info banner */
+.abanner{background:rgba(0,196,160,0.06);border:1px solid rgba(0,196,160,0.2);border-left:3px solid var(--rg-accent);border-radius:4px;padding:12px 16px;margin-bottom:14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--rg-text2);}
+.abanner strong{color:var(--rg-accent);}
+/* Job cards */
+.job-card{background:var(--rg-dark2);border:1px solid var(--rg-border);border-radius:5px;margin-bottom:10px;overflow:hidden;}
+.job-card-head{display:flex;align-items:center;justify-content:space-between;background:var(--rg-dark3);padding:11px 16px;cursor:pointer;user-select:none;gap:12px;}
+.job-card-head:hover{background:rgba(255,255,255,0.025);}
+.job-card-title{font-family:'DM Sans',Arial,sans-serif;font-weight:600;font-size:13px;color:var(--rg-text);}
+.job-card-body{padding:16px;display:none;}
+.job-card.open .job-card-body{display:block;}
+.jmeta{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-family:'DM Mono',monospace;font-size:11px;color:var(--rg-text2);}
+.jmeta span::before{content:'';display:inline-block;width:3px;height:3px;border-radius:50%;background:var(--rg-accent);margin-right:5px;vertical-align:middle;}
+.ilabel{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--rg-text3);margin:14px 0 8px;}
+/* Audit trail table */
+.audit-wrap{border:1px solid var(--rg-border);border-left:3px solid var(--rg-accent);border-radius:4px;overflow:hidden;}
+/* Misc */
+.empty{color:var(--rg-text3);font-style:italic;font-size:12px;padding:8px 0;font-family:'DM Mono',monospace;}
+.err{color:#f87171;font-size:12px;font-family:'DM Mono',monospace;padding:6px 0;}
+pre{font-family:'DM Mono',monospace;font-size:11px;color:var(--rg-text2);white-space:pre-wrap;}
+/* Footer */
+.rg-footer{background:var(--rg-dark);border-top:1px solid var(--rg-border);padding:18px 52px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-family:'DM Mono',monospace;font-size:10px;color:var(--rg-text3);}
+.rg-footer .fb strong{color:var(--rg-accent);font-size:11px;display:block;margin-bottom:2px;}
+.rg-footer .fc{text-align:center;align-self:center;}
+.rg-footer .fr{text-align:right;align-self:center;}
+/* Print */
+@media print{
+    body{background:#fff;color:#000;}
+    .toc{display:none;}
+    .layout{display:block;}
+    .main-content{padding:0;}
+    .job-card-body{display:block !important;}
+    th{background:#ddd;color:#000;}
+    td{color:#111;}
+    .section{border:1px solid #ccc;background:#fff;}
+    .section-head{background:#eee;}
+}
+"@
 
-    /* Redesign accent - their gradient goes teal->green */
-    --rg-teal:        #00c4a0;
-    --rg-green:       #4ade80;
-    --rg-accent:      #00c4a0;
-    --rg-accent-glow: rgba(0,196,160,0.18);
-
-    /* Text */
-    --rg-text:        #f0f0f0;
-    --rg-text-2:      #a0a0a0;
-    --rg-text-3:      #606060;
-
-    /* Semantic */
-    --success:   #4ade80;
-    --warn:      #fbbf24;
-    --fail:      #f87171;
-    --info:      #60a5fa;
-
-    /* Veeam reference colour */
-    --veeam:     #00b4d8;
-}
-
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-body {
-    font-family: 'DM Sans', sans-serif;
-    background: var(--rg-black);
-    color: var(--rg-text);
-    font-size: 13px;
-    line-height: 1.65;
-    -webkit-font-smoothing: antialiased;
-}
-
-/* ────────────────────────────────────────────────
-   HEADER
-──────────────────────────────────────────────── */
-.report-header {
-    background: var(--rg-dark);
-    border-bottom: 1px solid var(--rg-border);
-    padding: 0;
-    position: relative;
-    overflow: hidden;
-}
-
-/* Subtle animated gradient mesh - nod to RG hero */
-.report-header::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background:
-        radial-gradient(ellipse 60% 80% at 80% 50%, rgba(0,196,160,0.07) 0%, transparent 70%),
-        radial-gradient(ellipse 40% 60% at 10% 30%, rgba(74,222,128,0.04) 0%, transparent 60%);
-    pointer-events: none;
-}
-
-/* Dot-grid texture */
-.report-header::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background-image: radial-gradient(circle, rgba(255,255,255,0.04) 1px, transparent 1px);
-    background-size: 24px 24px;
-    pointer-events: none;
-}
-
-.header-inner {
-    position: relative;
-    z-index: 1;
-    padding: 48px 60px 40px;
-    display: grid;
-    grid-template-columns: 1fr auto;
-    align-items: start;
-    gap: 32px;
-}
-
-/* Redesign Group wordmark (SVG inline text) */
-.rg-logo {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-}
-.rg-logo-mark {
-    font-family: 'Syne', sans-serif;
-    font-weight: 800;
-    font-size: 13px;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    color: var(--rg-accent);
-}
-.rg-logo-sub {
-    font-family: 'DM Sans', sans-serif;
-    font-weight: 300;
-    font-size: 10px;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: var(--rg-text-2);
-}
-
-.header-left { display: flex; flex-direction: column; gap: 20px; }
-
-.header-chips {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-.chip {
-    font-family: 'DM Mono', monospace;
-    font-size: 9px;
-    font-weight: 500;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    padding: 4px 10px;
-    border-radius: 2px;
-    border: 1px solid;
-}
-.chip-veeam  { color: var(--veeam);   border-color: rgba(0,180,216,0.4);  background: rgba(0,180,216,0.06); }
-.chip-rg     { color: var(--rg-accent); border-color: rgba(0,196,160,0.4); background: rgba(0,196,160,0.06); }
-.chip-asbuilt{ color: var(--rg-text-2); border-color: var(--rg-border-lt); background: transparent; }
-
-.report-header h1 {
-    font-family: 'Syne', sans-serif;
-    font-weight: 700;
-    font-size: 30px;
-    letter-spacing: -0.5px;
-    color: var(--rg-text);
-    line-height: 1.15;
-}
-.report-header h1 em {
-    font-style: normal;
-    color: var(--rg-accent);
-}
-
-.header-meta {
-    font-family: 'DM Mono', monospace;
-    font-size: 11px;
-    color: var(--rg-text-2);
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 20px;
-}
-.header-meta span { display: flex; align-items: center; gap: 5px; }
-.header-meta span::before {
-    content: '';
-    display: inline-block;
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: var(--rg-accent);
-}
-
-/* Header right column: customer block */
-.header-right {
-    text-align: right;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    align-items: flex-end;
-}
-.header-right .customer-label {
-    font-size: 9px;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: var(--rg-text-3);
-    font-family: 'DM Mono', monospace;
-}
-.header-right .customer-name {
-    font-family: 'Syne', sans-serif;
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--rg-text);
-}
-.header-right .prepared-by {
-    font-size: 10px;
-    color: var(--rg-text-2);
-    font-family: 'DM Mono', monospace;
-}
-
-/* Accent bar at top */
-.header-accent-bar {
-    height: 3px;
-    background: linear-gradient(90deg, var(--rg-teal) 0%, var(--rg-green) 100%);
-}
-
-/* ────────────────────────────────────────────────
-   LAYOUT
-──────────────────────────────────────────────── */
-.layout {
-    display: grid;
-    grid-template-columns: 230px 1fr;
-    min-height: calc(100vh - 220px);
-}
-
-/* ── Sidebar TOC ── */
-.toc {
-    background: var(--rg-dark);
-    border-right: 1px solid var(--rg-border);
-    padding: 28px 0;
-    position: sticky;
-    top: 0;
-    height: 100vh;
-    overflow-y: auto;
-}
-.toc-header {
-    padding: 0 20px 16px;
-    border-bottom: 1px solid var(--rg-border);
-    margin-bottom: 12px;
-}
-.toc-header span {
-    font-size: 9px;
-    letter-spacing: 2.5px;
-    text-transform: uppercase;
-    color: var(--rg-text-3);
-    font-family: 'DM Mono', monospace;
-}
-.toc a {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    color: var(--rg-text-2);
-    text-decoration: none;
-    padding: 7px 20px;
-    font-size: 12px;
-    font-family: 'DM Sans', sans-serif;
-    font-weight: 400;
-    transition: all 0.15s;
-    border-left: 2px solid transparent;
-}
-.toc a:hover  { color: var(--rg-text); background: rgba(255,255,255,0.03); border-left-color: var(--rg-border-lt); }
-.toc a.active { color: var(--rg-accent); background: var(--rg-accent-glow); border-left-color: var(--rg-accent); }
-.toc a .toc-num {
-    font-family: 'DM Mono', monospace;
-    font-size: 9px;
-    color: var(--rg-text-3);
-    width: 16px;
-    flex-shrink: 0;
-}
-.toc a.active .toc-num { color: var(--rg-accent); }
-
-/* ── Main content ── */
-.main-content { padding: 40px 52px; max-width: 1200px; }
-
-/* ────────────────────────────────────────────────
-   SECTIONS
-──────────────────────────────────────────────── */
-.section {
-    margin-bottom: 52px;
-    scroll-margin-top: 24px;
-}
-.section-header {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding-bottom: 14px;
-    margin-bottom: 24px;
-    border-bottom: 1px solid var(--rg-border);
-}
-.section-num {
-    font-family: 'DM Mono', monospace;
-    font-size: 9px;
-    font-weight: 500;
-    color: var(--rg-accent);
-    background: var(--rg-accent-glow);
-    border: 1px solid rgba(0,196,160,0.25);
-    width: 28px;
-    height: 28px;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    letter-spacing: 0;
-}
-.section h2 {
-    font-family: 'Syne', sans-serif;
-    font-size: 17px;
-    font-weight: 700;
-    color: var(--rg-text);
-    letter-spacing: -0.2px;
-}
-
-.subsection { margin: 24px 0; }
-.subsection h3 {
-    font-family: 'DM Sans', sans-serif;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: var(--rg-text-2);
-    margin-bottom: 12px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-.subsection h3::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: var(--rg-border);
-}
-
-/* ────────────────────────────────────────────────
-   TABLES
-──────────────────────────────────────────────── */
-.table-wrap { overflow-x: auto; border-radius: 6px; border: 1px solid var(--rg-border); }
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-    font-family: 'DM Mono', monospace;
-    background: var(--rg-dark-2);
-}
-th {
-    background: var(--rg-dark-3);
-    color: var(--rg-text-3);
-    font-size: 9px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    padding: 10px 14px;
-    text-align: left;
-    border-bottom: 1px solid var(--rg-border);
-    white-space: nowrap;
-}
-td {
-    padding: 9px 14px;
-    border-bottom: 1px solid var(--rg-border);
-    vertical-align: top;
-    color: var(--rg-text);
-    word-break: break-word;
-    max-width: 380px;
-    font-family: 'DM Mono', monospace;
-    font-size: 12px;
-}
-tr:last-child td { border-bottom: none; }
-tr:hover td { background: rgba(255,255,255,0.015); }
-
-/* IP address cells */
-td.ip { color: var(--rg-accent); font-weight: 500; }
-
-/* ────────────────────────────────────────────────
-   BADGES
-──────────────────────────────────────────────── */
-.badge {
-    display: inline-block;
-    font-size: 9px;
-    font-family: 'DM Mono', monospace;
-    font-weight: 500;
-    padding: 2px 8px;
-    border-radius: 2px;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    border: 1px solid;
-}
-.badge-success { background: rgba(74,222,128,0.08);  color: var(--success); border-color: rgba(74,222,128,0.25); }
-.badge-warn    { background: rgba(251,191,36,0.08);  color: var(--warn);    border-color: rgba(251,191,36,0.25); }
-.badge-fail    { background: rgba(248,113,113,0.08); color: var(--fail);    border-color: rgba(248,113,113,0.25); }
-.badge-info    { background: rgba(96,165,250,0.08);  color: var(--info);    border-color: rgba(96,165,250,0.25); }
-.badge-neutral { background: rgba(96,96,96,0.12);    color: var(--rg-text-2); border-color: var(--rg-border-lt); }
-
-/* ────────────────────────────────────────────────
-   SUMMARY CARDS
-──────────────────────────────────────────────── */
-.summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
-    gap: 14px;
-    margin-bottom: 40px;
-}
-.summary-card {
-    background: var(--rg-dark-2);
-    border: 1px solid var(--rg-border);
-    border-radius: 6px;
-    padding: 20px 16px 16px;
-    position: relative;
-    overflow: hidden;
-    transition: border-color 0.2s;
-}
-.summary-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, var(--rg-teal), var(--rg-green));
-    opacity: 0.6;
-}
-.summary-card:hover { border-color: rgba(0,196,160,0.3); }
-.summary-card .val {
-    font-family: 'Syne', sans-serif;
-    font-size: 34px;
-    font-weight: 800;
-    color: var(--rg-text);
-    line-height: 1;
-}
-.summary-card .lbl {
-    font-size: 9px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: var(--rg-text-3);
-    margin-top: 8px;
-    font-family: 'DM Mono', monospace;
-}
-
-/* ────────────────────────────────────────────────
-   HEALTH BANNER
-──────────────────────────────────────────────── */
-.health-banner {
-    background: rgba(248,113,113,0.06);
-    border: 1px solid rgba(248,113,113,0.25);
-    border-left: 3px solid var(--fail);
-    border-radius: 4px;
-    padding: 18px 22px;
-    margin-bottom: 32px;
-}
-.health-banner h3 {
-    color: var(--fail);
-    font-size: 10px;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    font-family: 'DM Mono', monospace;
-    margin-bottom: 12px;
-}
-.health-banner ul { padding-left: 18px; }
-.health-banner li { color: var(--fail); font-size: 12px; margin-bottom: 5px; font-family: 'DM Mono', monospace; }
-
-/* ────────────────────────────────────────────────
-   JOB CARDS
-──────────────────────────────────────────────── */
-.job-card {
-    background: var(--rg-dark-2);
-    border: 1px solid var(--rg-border);
-    border-radius: 6px;
-    margin-bottom: 12px;
-    overflow: hidden;
-    transition: border-color 0.15s;
-}
-.job-card:hover { border-color: var(--rg-border-lt); }
-.job-card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: var(--rg-dark-3);
-    padding: 13px 18px;
-    cursor: pointer;
-    user-select: none;
-    gap: 12px;
-}
-.job-card-header:hover { background: rgba(255,255,255,0.025); }
-.job-card-title {
-    font-family: 'DM Sans', sans-serif;
-    font-weight: 600;
-    font-size: 13px;
-    color: var(--rg-text);
-}
-.job-card-body { padding: 18px; display: none; }
-.job-card.open .job-card-body { display: block; }
-.job-card-meta {
-    display: flex;
-    gap: 18px;
-    flex-wrap: wrap;
-    margin-bottom: 14px;
-    font-size: 11px;
-    color: var(--rg-text-2);
-    font-family: 'DM Mono', monospace;
-}
-.job-card-meta span { display: flex; align-items: center; gap: 4px; }
-.job-card-meta span::before {
-    content: '';
-    width: 3px; height: 3px;
-    border-radius: 50%;
-    background: var(--rg-accent);
-    flex-shrink: 0;
-}
-
-.inner-label {
-    margin: 14px 0 8px;
-    font-size: 9px;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: var(--rg-text-3);
-    font-family: 'DM Mono', monospace;
-    font-weight: 500;
-}
-
-/* ────────────────────────────────────────────────
-   AUDIT TABLE (backup copy audit)
-──────────────────────────────────────────────── */
-.audit-table-wrap {
-    background: var(--rg-dark);
-    border: 1px solid var(--rg-border);
-    border-left: 3px solid var(--rg-accent);
-    border-radius: 4px;
-    overflow: hidden;
-    margin-bottom: 16px;
-}
-.audit-table-wrap table {
-    background: transparent;
-}
-
-/* ────────────────────────────────────────────────
-   MISC
-──────────────────────────────────────────────── */
-.empty { color: var(--rg-text-3); font-style: italic; font-size: 12px; padding: 10px 0; font-family: 'DM Mono', monospace; }
-.error { color: var(--fail); font-size: 12px; font-family: 'DM Mono', monospace; padding: 8px 0; }
-.note  { color: var(--rg-text-3); font-size: 11px; margin-top: 6px; font-family: 'DM Mono', monospace; }
-hr     { border: none; border-top: 1px solid var(--rg-border); margin: 36px 0; }
-pre    { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--rg-text-2); white-space: pre-wrap; }
-
-/* Section separator pill */
-.section-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--rg-accent-glow);
-    border: 1px solid rgba(0,196,160,0.2);
-    border-radius: 20px;
-    padding: 3px 10px 3px 6px;
-    font-size: 10px;
-    color: var(--rg-accent);
-    font-family: 'DM Mono', monospace;
-    margin-bottom: 18px;
-}
-.section-pill::before {
-    content: '';
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--rg-accent);
-}
-
-/* ────────────────────────────────────────────────
-   FOOTER
-──────────────────────────────────────────────── */
-.report-footer {
-    background: var(--rg-dark);
-    border-top: 1px solid var(--rg-border);
-    padding: 20px 52px;
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 12px;
-    font-family: 'DM Mono', monospace;
-    font-size: 10px;
-    color: var(--rg-text-3);
-}
-.report-footer .footer-brand {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-}
-.report-footer .footer-brand strong {
-    color: var(--rg-accent);
-    font-size: 11px;
-}
-.report-footer .footer-center { text-align: center; align-self: center; }
-.report-footer .footer-right  { text-align: right; align-self: center; }
-.footer-accent-bar {
-    height: 2px;
-    background: linear-gradient(90deg, var(--rg-teal) 0%, var(--rg-green) 100%);
-    opacity: 0.5;
-}
-
-/* ────────────────────────────────────────────────
-   PRINT
-──────────────────────────────────────────────── */
-@media print {
-    body { background: #fff; color: #000; }
-    .toc { display: none; }
-    .layout { display: block; }
-    .main-content { padding: 0; max-width: none; }
-    .job-card-body { display: block !important; }
-    th { background: #e8e8e8; color: #333; }
-    td { color: #111; }
-    .badge { border: 1px solid #999; background: #eee; color: #000; }
-    .report-header { background: #111; }
-    .section { page-break-inside: avoid; }
-    table { border: 1px solid #ccc; }
-    .summary-card { border: 1px solid #ccc; background: #f9f9f9; }
-    .summary-card .val { color: #000; }
-}
-'@
-
-$JS = @'
-// Job card toggle
-document.querySelectorAll('.job-card-header').forEach(h => {
+# =============================================================================
+# JavaScript - collapsible cards, sticky TOC, table wrapping, IP highlighting
+# =============================================================================
+$JS = @"
+document.querySelectorAll('.job-card-head').forEach(h => {
     h.addEventListener('click', () => h.parentElement.classList.toggle('open'));
 });
-
-// Sticky TOC highlight
-const sections = document.querySelectorAll('.section');
-const tocLinks = document.querySelectorAll('.toc a');
-const observer = new IntersectionObserver(entries => {
+const secs = document.querySelectorAll('.section');
+const links = document.querySelectorAll('.toc a');
+const obs = new IntersectionObserver(entries => {
     entries.forEach(e => {
         if (e.isIntersecting) {
-            tocLinks.forEach(l => l.classList.remove('active'));
-            const link = document.querySelector(`.toc a[href="#${e.target.id}"]`);
-            if (link) link.classList.add('active');
+            links.forEach(l => l.classList.remove('active'));
+            const l = document.querySelector('.toc a[href="#' + e.target.id + '"]');
+            if (l) l.classList.add('active');
         }
     });
 }, { rootMargin: '-20% 0px -70% 0px' });
-sections.forEach(s => observer.observe(s));
-
-// Wrap all tables that aren't already wrapped
+secs.forEach(s => obs.observe(s));
 document.querySelectorAll('table').forEach(t => {
-    if (!t.parentElement.classList.contains('table-wrap') &&
-        !t.parentElement.classList.contains('audit-table-wrap')) {
-        const wrap = document.createElement('div');
-        wrap.className = 'table-wrap';
-        t.parentNode.insertBefore(wrap, t);
-        wrap.appendChild(t);
+    if (!t.parentElement.classList.contains('tw') && !t.parentElement.classList.contains('audit-wrap')) {
+        const w = document.createElement('div');
+        w.className = 'tw';
+        t.parentNode.insertBefore(w, t);
+        w.appendChild(t);
     }
 });
-
-// Colour IP address cells
 document.querySelectorAll('td').forEach(td => {
     if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(td.textContent.trim())) {
         td.classList.add('ip');
     }
 });
-'@
+"@
 
-# ─── 3. DATA COLLECTION ──────────────────────────────────────────────────────
+# =============================================================================
+# DATA COLLECTION
+# =============================================================================
 
-Write-Host "⏳  Collecting Veeam configuration data..." -ForegroundColor Cyan
+Write-Host "Collecting Veeam configuration data..." -ForegroundColor Cyan
 
-# ── 3.1 Backup Server ──
-$BkpServer = $null
-try { $BkpServer = Get-VBRServer | Where-Object { $_.IsLocal -or $_.Type -eq 'Local' } | Select-Object -First 1 }
-catch { Write-Warning "Could not retrieve local server info: $_" }
+$BkpServer   = $null; try { $BkpServer   = Get-VBRServer | Where-Object { $_.Type -eq 'Local' } | Select-Object -First 1 } catch { }
+$License     = $null; try { $License     = Get-VBRInstalledLicense } catch { }
+$AllJobs     = @();   try { $AllJobs     = @(Get-VBRJob) } catch { }
+$BackupJobs  = $AllJobs | Where-Object { $_.JobType -eq 'Backup' }
+$CopyJobs    = $AllJobs | Where-Object { $_.JobType -eq 'BackupSync' }
+$ReplJobs    = $AllJobs | Where-Object { $_.JobType -in @('Replica','SimpleTransactionLog') }
+$NasJobs     = @(); try { $NasJobs     = @(Get-VBRNASBackupJob) }         catch { }
+$TapeJobs    = @(); try { $TapeJobs    = @(Get-VBRTapeJob) }              catch { }
+$ViProxies   = @(); try { $ViProxies   = @(Get-VBRViProxy) }             catch { }
+$HvProxies   = @(); try { $HvProxies   = @(Get-VBRHvProxy) }             catch { }
+$NasProxies  = @(); try { $NasProxies  = @(Get-VBRNASProxyServer) }      catch { }
+$Repos       = @(); try { $Repos       = @(Get-VBRBackupRepository) }    catch { }
+$SOBRs       = @(); try { $SOBRs       = @(Get-VBRBackupRepository -ScaleOut) } catch { }
+$ExtRepos    = @(); try { $ExtRepos    = @(Get-VBRExternalRepository) }  catch { }
+$CDPPolicies = @(); try { $CDPPolicies = @(Get-VBRCDPPolicy) }           catch { }
+$SBJobs      = @(); try { $SBJobs      = @(Get-VBRSureBackupJob) }       catch { }
+$VLabs       = @(); try { $VLabs       = @(Get-VBRVirtualLab) }          catch { }
+$AppGroups   = @(); try { $AppGroups   = @(Get-VBRApplicationGroup) }    catch { }
+$TapeLibs    = @(); try { $TapeLibs    = @(Get-VBRTapeLibrary) }         catch { }
+$TapePools   = @(); try { $TapePools   = @(Get-VBRTapeMediaPool) }       catch { }
+$CloudTenants= @(); try { $CloudTenants= @(Get-VBRCloudTenant) }         catch { }
+$ViServers   = @(); try { $ViServers   = @(Get-VBRServer | Where-Object { $_.Type -in @('VC','ESXi') }) } catch { }
+$HvServers   = @(); try { $HvServers   = @(Get-VBRServer | Where-Object { $_.Type -eq 'HvServer' }) }    catch { }
+$FileShares  = @(); try { $FileShares  = @(Get-VBRNASFileShare) }        catch { }
+$Credentials = @(); try { $Credentials = @(Get-VBRCredentials | Select-Object Name, Description) } catch { }
+$NotifOpts   = $null; try { $NotifOpts = Get-VBRNotificationOptions }    catch { }
+$EmailOpts   = $null; try { $EmailOpts = Get-VBREmailOptions }           catch { }
 
-# ── 3.2 License ──
-$License = $null
-try {
-    $License = Get-VBRInstalledLicense
-    if ($HealthCheck) {
-        if ($License.Status -eq 'Expired') { Add-HealthWarning "License is EXPIRED." }
-        elseif ($License.ExpirationDate -lt (Get-Date).AddDays(30)) {
-            Add-HealthWarning "License expires within 30 days: $($License.ExpirationDate.ToString('yyyy-MM-dd'))"
-        }
-    }
-} catch { Write-Warning "License query failed: $_" }
-
-# ── 3.3 Proxies (with IP resolution) ──
-$ViProxies  = @(); try { $ViProxies  = @(Get-VBRViProxy)  } catch { Write-Warning "VI Proxies: $_" }
-$HvProxies  = @(); try { $HvProxies  = @(Get-VBRHvProxy)  } catch { Write-Warning "HV Proxies: $_" }
-$NasProxies = @(); try { $NasProxies = @(Get-VBRNASProxyServer) } catch { Write-Warning "NAS Proxies: $_" }
-
-# Resolve proxy IPs at collection time
-$ViProxyData = $ViProxies | ForEach-Object {
-    $hostName = $_.Host.Name
+# Build backup copy job audit records
+$CopyJobAudit = $CopyJobs | ForEach-Object {
+    $j = $_
+    $last = $null
+    try { $last = Get-VBRJobSession -Job $j -Last 1 -ErrorAction SilentlyContinue } catch { }
+    $srcRepo = try { ($j.GetSourceRepository()).Name } catch { 'N/A' }
+    $tgtRepo = try { $j.GetTargetRepository().Name   } catch { 'N/A' }
     [PSCustomObject]@{
-        Name             = $_.Name
-        Host             = $hostName
-        'IP Address'     = Resolve-HostIP $hostName
-        'Transport Mode' = $_.Options.TransportMode
-        'Max Tasks'      = $_.MaxTasksCount
-        Status           = if ($_.IsDisabled) { 'Disabled' } else { 'Enabled' }
-    }
-}
-$HvProxyData = $HvProxies | ForEach-Object {
-    $hostName = $_.Host.Name
-    [PSCustomObject]@{
-        Name         = $_.Name
-        Host         = $hostName
-        'IP Address' = Resolve-HostIP $hostName
-        'Max Tasks'  = $_.MaxTasksCount
-    }
-}
-$NasProxyData = $NasProxies | ForEach-Object {
-    $srvName = $_.Server.Name
-    [PSCustomObject]@{
-        Name         = $_.Name
-        Server       = $srvName
-        'IP Address' = Resolve-HostIP $srvName
-        Description  = $_.Description
+        Name          = $j.Name
+        Enabled       = $j.IsScheduleEnabled
+        'Source Repo' = $srcRepo
+        'Target Repo' = $tgtRepo
+        'Last Result' = if ($last) { $last.Result } else { 'No Sessions' }
+        'Last Run'    = if ($last) { $last.EndTime.ToString('yyyy-MM-dd HH:mm') } else { 'Never' }
+        'Xfer GB'     = if ($last) { [math]::Round($last.Progress.TransferedSize / 1GB, 2) } else { 0 }
+        Description   = $j.Description
     }
 }
 
-# ── 3.4 Repositories (with IP resolution) ──
-$Repos = @()
-try {
-    $Repos = @(Get-VBRBackupRepository)
-    if ($HealthCheck) {
-        foreach ($r in $Repos) {
-            if ($r.TotalSpace -gt 0) {
-                $pctFree = [math]::Round(($r.FreeSpace / $r.TotalSpace) * 100, 1)
-                if ($pctFree -lt 10)  { Add-HealthWarning "Repository '$($r.Name)' critically low on space ($pctFree% free)." }
-                elseif ($pctFree -lt 20) { Add-HealthWarning "Repository '$($r.Name)' below 20% free space ($pctFree%)." }
-            }
-        }
-    }
-} catch { Write-Warning "Repositories: $_" }
-
-$RepoData = $Repos | ForEach-Object {
-    $freeGB  = [math]::Round($_.FreeSpace  / 1GB, 1)
-    $totalGB = [math]::Round($_.TotalSpace / 1GB, 1)
-    $pctFree = if ($totalGB -gt 0) { [math]::Round(($freeGB / $totalGB) * 100, 1) } else { 'N/A' }
-    $hostName = $_.Host.Name
-    [PSCustomObject]@{
-        Name           = $_.Name
-        Type           = $_.Type
-        Host           = $hostName
-        'IP Address'   = Resolve-HostIP $hostName
-        Path           = $_.Path
-        'Total (GB)'   = $totalGB
-        'Free (GB)'    = $freeGB
-        'Free %'       = $pctFree
-        'Per-VM'       = $_.UsePerVMBackupFiles
-        Immutability   = $_.ImmutabilityEnabled
-    }
-}
-
-# ── 3.5 SOBR ──
-$SOBRs = @(); try { $SOBRs = @(Get-VBRBackupRepository -ScaleOut) } catch { Write-Warning "SOBR: $_" }
-
-# ── 3.6 External Repos ──
-$ExtRepos = @(); try { $ExtRepos = @(Get-VBRExternalRepository) } catch { Write-Warning "External Repos: $_" }
-
-# ── 3.7 All Jobs ──
-$AllJobs = @(); try { $AllJobs = @(Get-VBRJob) } catch { Write-Warning "Jobs: $_" }
-
+# Health check warnings
+$Warnings = [System.Collections.Generic.List[string]]::new()
 if ($HealthCheck) {
     foreach ($j in $AllJobs) {
         if ($j.IsScheduleEnabled) {
             try {
-                $lastSession = Get-VBRJobSession -Job $j -Last 1 -ErrorAction SilentlyContinue
-                if ($lastSession -and $lastSession.Result -eq 'Failed') {
-                    Add-HealthWarning "Job '$($j.Name)' last run FAILED ($(($lastSession.EndTime).ToString('yyyy-MM-dd HH:mm')))."
+                $s = Get-VBRJobSession -Job $j -Last 1 -ErrorAction SilentlyContinue
+                if ($s -and $s.Result -eq 'Failed') {
+                    $Warnings.Add("Job '$($j.Name)' last run FAILED ($($s.EndTime.ToString('yyyy-MM-dd HH:mm'))).")
                 }
             } catch { }
         }
     }
-}
-
-# ── 3.8 Job type splits ──
-$BackupJobs = $AllJobs | Where-Object { $_.JobType -eq 'Backup' }
-$CopyJobs   = $AllJobs | Where-Object { $_.JobType -eq 'BackupSync' }
-$ReplJobs   = $AllJobs | Where-Object { $_.JobType -in @('Replica','SimpleTransactionLog') }
-
-# ── 3.9 NAS Backup Jobs ──
-$NasJobs = @(); try { $NasJobs = @(Get-VBRNASBackupJob) } catch { Write-Warning "NAS Backup Jobs: $_" }
-
-# ── 3.10 CDP Policies ──
-$CDPPolicies = @(); try { $CDPPolicies = @(Get-VBRCDPPolicy) } catch { Write-Warning "CDP: $_" }
-
-# ── 3.11 SureBackup ──
-$SBJobs    = @(); try { $SBJobs    = @(Get-VBRSureBackupJob)     } catch { Write-Warning "SureBackup: $_" }
-$VLabs     = @(); try { $VLabs     = @(Get-VBRVirtualLab)        } catch { Write-Warning "Virtual Labs: $_" }
-$AppGroups = @(); try { $AppGroups = @(Get-VBRApplicationGroup)  } catch { Write-Warning "App Groups: $_" }
-
-# ── 3.12 Tape ──
-$TapeLibraries  = @(); try { $TapeLibraries  = @(Get-VBRTapeLibrary)   } catch { Write-Warning "Tape Libraries: $_" }
-$TapeMediaPools = @(); try { $TapeMediaPools = @(Get-VBRTapeMediaPool)  } catch { Write-Warning "Tape Media Pools: $_" }
-$TapeJobs       = @(); try { $TapeJobs       = @(Get-VBRTapeJob)        } catch { Write-Warning "Tape Jobs: $_" }
-
-# ── 3.13 Cloud Connect ──
-$CloudTenants  = @(); try { $CloudTenants  = @(Get-VBRCloudTenant)      } catch { Write-Warning "Cloud Tenants: $_" }
-$CloudHardware = @(); try { $CloudHardware = @(Get-VBRCloudHardwarePlan)} catch { Write-Warning "Cloud HW Plans: $_" }
-
-# ── 3.14 vSphere / Hyper-V Infrastructure ──
-$ViServers = @(); try { $ViServers = @(Get-VBRServer | Where-Object { $_.Type -in @('VC','ESXi') }) } catch { Write-Warning "VI Servers: $_" }
-$HvServers = @(); try { $HvServers = @(Get-VBRServer | Where-Object { $_.Type -eq 'HvServer' })    } catch { Write-Warning "HV Servers: $_" }
-
-# ── 3.15 NAS File Shares ──
-$FileShares = @(); try { $FileShares = @(Get-VBRNASFileShare) } catch { Write-Warning "File Shares: $_" }
-
-# ── 3.16 Credentials ──
-$Credentials = @(); try { $Credentials = @(Get-VBRCredentials | Select-Object Name, Description) } catch { Write-Warning "Credentials: $_" }
-
-# ── 3.17 Notifications ──
-$NotifOpts = $null; try { $NotifOpts = Get-VBRNotificationOptions } catch { }
-$EmailOpts = $null; try { $EmailOpts = Get-VBREmailOptions         } catch { }
-
-# ── 3.18 Backup Copy Job Session Audit ──
-# Pull last session result for each copy job
-$CopyJobAudit = $CopyJobs | ForEach-Object {
-    $job = $_
-    $lastSession = $null
-    try { $lastSession = Get-VBRJobSession -Job $job -Last 1 -ErrorAction SilentlyContinue } catch { }
-    $srcRepo = try { ($job.GetSourceRepository()).Name } catch { 'N/A' }
-    [PSCustomObject]@{
-        Name           = $job.Name
-        Enabled        = $job.IsScheduleEnabled
-        'Source Repo'  = $srcRepo
-        'Target Repo'  = try { $job.GetTargetRepository()?.Name } catch { 'N/A' }
-        'Last Result'  = if ($lastSession) { $lastSession.Result } else { 'No Sessions' }
-        'Last Run'     = if ($lastSession) { $lastSession.EndTime.ToString('yyyy-MM-dd HH:mm') } else { 'Never' }
-        'Transfer (GB)'= if ($lastSession) { [math]::Round($lastSession.Progress.TransferedSize / 1GB, 2) } else { 0 }
-        Description    = $job.Description
+    foreach ($r in $Repos) {
+        if ($r.TotalSpace -gt 0) {
+            $pct = [math]::Round(($r.FreeSpace / $r.TotalSpace) * 100, 1)
+            if ($pct -lt 10)  { $Warnings.Add("Repo '$($r.Name)' critically low: $pct% free.") }
+            elseif ($pct -lt 20) { $Warnings.Add("Repo '$($r.Name)' below 20% free ($pct%).") }
+        }
+    }
+    foreach ($ca in $CopyJobAudit) {
+        if ($ca.'Last Result' -eq 'Failed') { $Warnings.Add("Backup Copy Job '$($ca.Name)' last run FAILED.") }
+    }
+    if ($License -and $License.ExpirationDate -lt (Get-Date).AddDays(30)) {
+        $Warnings.Add("License expires soon: $($License.ExpirationDate.ToString('yyyy-MM-dd'))")
     }
 }
 
-Write-Host "✅  Data collection complete." -ForegroundColor Green
+$totalJobs  = $AllJobs.Count + $NasJobs.Count + $TapeJobs.Count
+$enabledJobs= ($AllJobs | Where-Object { $_.IsScheduleEnabled }).Count
+$totalRepos = $Repos.Count + $SOBRs.Count
+$totalProx  = $ViProxies.Count + $HvProxies.Count + $NasProxies.Count
 
-# ─── 4. SUMMARY VALUES ───────────────────────────────────────────────────────
+Write-Host "Data collected. Building HTML report..." -ForegroundColor Cyan
 
-$totalJobs    = $AllJobs.Count + $NasJobs.Count + $TapeJobs.Count
-$enabledJobs  = ($AllJobs | Where-Object { $_.IsScheduleEnabled }).Count
-$totalRepos   = $Repos.Count + $SOBRs.Count
-$totalProxies = $ViProxies.Count + $HvProxies.Count + $NasProxies.Count
+# =============================================================================
+# HTML GENERATION
+# =============================================================================
 
-# ─── 5. HTML GENERATION ──────────────────────────────────────────────────────
-
-Write-Host "⏳  Building HTML report..." -ForegroundColor Cyan
 $sb = [System.Text.StringBuilder]::new()
 
-[void]$sb.AppendLine(@"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>$ReportTitle - $CustomerName</title>
-<style>$CSS</style>
-</head>
-<body>
-"@)
+[void]$sb.AppendLine("<!DOCTYPE html><html lang='en'><head>")
+[void]$sb.AppendLine("<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1.0'>")
+[void]$sb.AppendLine("<title>$ReportName - $CustomerName</title>")
+[void]$sb.AppendLine("<style>$CSS</style></head><body>")
 
-# ── Header ──
-[void]$sb.AppendLine(@"
-<div class="header-accent-bar"></div>
-<div class="report-header">
-  <div class="header-inner">
-    <div class="header-left">
-      <div class="rg-logo">
-        <span class="rg-logo-mark">The Redesign Group</span>
-        <span class="rg-logo-sub">Technology &amp; Cybersecurity Consulting</span>
-      </div>
-      <div class="header-chips">
-        <span class="chip chip-veeam">Veeam B&amp;R v13</span>
-        <span class="chip chip-rg">Data Protection</span>
-        <span class="chip chip-asbuilt">As-Built Report</span>
-      </div>
-      <h1>$([System.Web.HttpUtility]::HtmlEncode($ReportTitle))</h1>
-      <div class="header-meta">
-        <span>Generated: $ReportDate</span>
-        <span>Server: $($BkpServer.Name ?? 'Unknown')</span>
-        <span>Module: $($VeeamModule.Version)</span>
-      </div>
-    </div>
-    <div class="header-right">
-      <span class="customer-label">Prepared for</span>
-      <span class="customer-name">$([System.Web.HttpUtility]::HtmlEncode($CustomerName))</span>
-      <span class="prepared-by">Prepared by: $([System.Web.HttpUtility]::HtmlEncode($PreparedBy))</span>
-    </div>
-  </div>
-</div>
-"@)
+# Accent bar + Header
+[void]$sb.AppendLine("<div class='accent-bar'></div>")
+[void]$sb.AppendLine("<div class='rg-header'><div class='header-inner'>")
+[void]$sb.AppendLine("  <div class='header-left'>")
+[void]$sb.AppendLine("    <div class='rg-wordmark'><span class='mark'>The Redesign Group</span><span class='sub'>Technology &amp; Cybersecurity Consulting</span></div>")
+[void]$sb.AppendLine("    <div class='chip-row'><span class='chip chip-v'>Veeam B&amp;R v13</span><span class='chip chip-rg'>Data Protection</span><span class='chip chip-ab'>As-Built Report</span></div>")
+[void]$sb.AppendLine("    <div class='report-title'>$ReportName</div>")
+[void]$sb.AppendLine("    <div class='header-meta'><span>Generated: $ReportDate</span><span>Server: $($BkpServer.Name ?? 'Unknown')</span></div>")
+[void]$sb.AppendLine("  </div>")
+[void]$sb.AppendLine("  <div class='header-right'>")
+[void]$sb.AppendLine("    <span class='cust-label'>Prepared for</span>")
+[void]$sb.AppendLine("    <span class='cust-name'>$CustomerName</span>")
+[void]$sb.AppendLine("    <span class='prep-by'>Prepared by: $PreparedBy</span>")
+[void]$sb.AppendLine("  </div>")
+[void]$sb.AppendLine("</div></div>")
 
-# ── Layout + TOC ──
-[void]$sb.AppendLine('<div class="layout">')
-[void]$sb.AppendLine(@'
-<nav class="toc">
-  <div class="toc-header"><span>Contents</span></div>
-  <a href="#sec-summary"><span class="toc-num">◈</span>Summary Dashboard</a>
-  <a href="#sec-server"><span class="toc-num">01</span>Backup Server</a>
-  <a href="#sec-license"><span class="toc-num">02</span>License</a>
-  <a href="#sec-infra"><span class="toc-num">03</span>Infrastructure</a>
-  <a href="#sec-repos"><span class="toc-num">04</span>Repositories</a>
-  <a href="#sec-jobs"><span class="toc-num">05</span>Backup Jobs</a>
-  <a href="#sec-copyjobs"><span class="toc-num">06</span>Backup Copy Jobs</a>
-  <a href="#sec-nas"><span class="toc-num">07</span>NAS Backup</a>
-  <a href="#sec-replication"><span class="toc-num">08</span>Replication &amp; CDP</a>
-  <a href="#sec-surebackup"><span class="toc-num">09</span>SureBackup</a>
-  <a href="#sec-tape"><span class="toc-num">10</span>Tape</a>
-  <a href="#sec-cloud"><span class="toc-num">11</span>Cloud Connect</a>
-  <a href="#sec-inventory"><span class="toc-num">12</span>Inventory</a>
-  <a href="#sec-global"><span class="toc-num">13</span>Global Settings</a>
-</nav>
-'@)
+# Layout + TOC
+[void]$sb.AppendLine("<div class='layout'>")
+[void]$sb.AppendLine("<nav class='toc'>")
+[void]$sb.AppendLine("  <div class='toc-title'>Contents</div>")
+[void]$sb.AppendLine("  <a href='#sec-dash'><span class='tn'>*</span>Dashboard</a>")
+[void]$sb.AppendLine("  <a href='#sec-server'><span class='tn'>01</span>Backup Server</a>")
+[void]$sb.AppendLine("  <a href='#sec-license'><span class='tn'>02</span>License</a>")
+[void]$sb.AppendLine("  <a href='#sec-infra'><span class='tn'>03</span>Infrastructure</a>")
+[void]$sb.AppendLine("  <a href='#sec-repos'><span class='tn'>04</span>Repositories</a>")
+[void]$sb.AppendLine("  <a href='#sec-jobs'><span class='tn'>05</span>Backup Jobs</a>")
+[void]$sb.AppendLine("  <a href='#sec-copy'><span class='tn'>06</span>Backup Copy Jobs</a>")
+[void]$sb.AppendLine("  <a href='#sec-nas'><span class='tn'>07</span>NAS Backup</a>")
+[void]$sb.AppendLine("  <a href='#sec-repl'><span class='tn'>08</span>Replication &amp; CDP</a>")
+[void]$sb.AppendLine("  <a href='#sec-sb'><span class='tn'>09</span>SureBackup</a>")
+[void]$sb.AppendLine("  <a href='#sec-tape'><span class='tn'>10</span>Tape</a>")
+[void]$sb.AppendLine("  <a href='#sec-cloud'><span class='tn'>11</span>Cloud Connect</a>")
+[void]$sb.AppendLine("  <a href='#sec-inv'><span class='tn'>12</span>Inventory</a>")
+[void]$sb.AppendLine("  <a href='#sec-global'><span class='tn'>13</span>Global Settings</a>")
+[void]$sb.AppendLine("</nav>")
+[void]$sb.AppendLine("<div class='main-content'>")
 
-[void]$sb.AppendLine('<div class="main-content">')
-
-# ── Health Warnings ──
+# Health warnings
 if ($HealthCheck -and $Warnings.Count -gt 0) {
-    [void]$sb.AppendLine('<div class="health-banner"><h3>▲ Health Check Warnings</h3><ul>')
-    foreach ($w in $Warnings) { [void]$sb.AppendLine("<li>$([System.Web.HttpUtility]::HtmlEncode($w))</li>") }
-    [void]$sb.AppendLine('</ul></div>')
+    [void]$sb.AppendLine("<div class='hbanner'><h3>Health Check Warnings</h3><ul>")
+    foreach ($w in $Warnings) { [void]$sb.AppendLine("<li>$w</li>") }
+    [void]$sb.AppendLine("</ul></div>")
 }
 
-# ── Summary Dashboard ──
-[void]$sb.AppendLine('<div class="section" id="sec-summary"><div class="section-header"><span class="section-num">◈</span><h2>Summary Dashboard</h2></div>')
-[void]$sb.AppendLine('<div class="summary-grid">')
-$cards = @(
-    @{ Val = $totalJobs;                                              Lbl = "Total Jobs" },
-    @{ Val = $enabledJobs;                                            Lbl = "Scheduled" },
-    @{ Val = $BackupJobs.Count;                                       Lbl = "Backup Jobs" },
-    @{ Val = $CopyJobs.Count;                                         Lbl = "Copy Jobs" },
-    @{ Val = $totalRepos;                                             Lbl = "Repositories" },
-    @{ Val = $totalProxies;                                           Lbl = "Proxies" },
-    @{ Val = ($ViServers.Count + $HvServers.Count);                   Lbl = "Hypervisors" },
-    @{ Val = $TapeLibraries.Count;                                    Lbl = "Tape Libraries" }
-)
-foreach ($c in $cards) {
-    [void]$sb.AppendLine("<div class='summary-card'><div class='val'>$($c.Val)</div><div class='lbl'>$($c.Lbl)</div></div>")
+# ---- Dashboard ----
+[void]$sb.AppendLine("<div class='section' id='sec-dash'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>*</span><h2>Summary Dashboard</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'><div class='cards'>")
+@(
+    @{V=$totalJobs;                               L="Total Jobs"},
+    @{V=$enabledJobs;                             L="Scheduled"},
+    @{V=$BackupJobs.Count;                        L="Backup Jobs"},
+    @{V=$CopyJobs.Count;                          L="Copy Jobs"},
+    @{V=$totalRepos;                              L="Repositories"},
+    @{V=$totalProx;                               L="Proxies"},
+    @{V=($ViServers.Count + $HvServers.Count);    L="Hypervisors"},
+    @{V=$TapeLibs.Count;                          L="Tape Libraries"}
+) | ForEach-Object {
+    [void]$sb.AppendLine("<div class='card'><div class='val'>$($_.V)</div><div class='lbl'>$($_.L)</div></div>")
 }
-[void]$sb.AppendLine('</div></div>')
+[void]$sb.AppendLine("  </div></div></div>")
 
-# ── Section 1: Backup Server ──
-[void]$sb.AppendLine('<div class="section" id="sec-server"><div class="section-header"><span class="section-num">01</span><h2>Backup Server</h2></div>')
-if ($BkpServer) {
-    $serverData = [PSCustomObject]@{
-        Name         = $BkpServer.Name
-        'IP Address' = Resolve-HostIP $BkpServer.Name
-        DNS          = $BkpServer.DNSName
-        Type         = $BkpServer.Type
-        Description  = $BkpServer.Description
-        'Connected'  = $BkpServer.IsConnected
+# ---- Section 01: Backup Server & Global Settings ----
+[void]$sb.AppendLine("<div class='section' id='sec-server'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>01</span><h2>Backup Server &amp; Global Settings</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
+
+$srvTable = Get-VBRServer | Where-Object { $_.Type -eq 'Local' } | ForEach-Object {
+    [PSCustomObject]@{
+        Name        = $_.Name
+        'IP Address'= Resolve-HostIP $_.Name
+        Version     = $_.Version
+        DNS         = $_.DNSName
+        Connected   = $_.IsConnected
     }
-    [void]$sb.AppendLine(($serverData | ConvertTo-HtmlTable))
-} else {
-    [void]$sb.AppendLine("<p class='error'>Could not retrieve local server information.</p>")
 }
-[void]$sb.AppendLine('</div>')
+[void]$sb.AppendLine(($srvTable | ConvertTo-Html -Fragment))
 
-# ── Section 2: License ──
-[void]$sb.AppendLine('<div class="section" id="sec-license"><div class="section-header"><span class="section-num">02</span><h2>License</h2></div>')
+[void]$sb.AppendLine("<div class='subsection' style='margin-top:20px'><h3>Global Options</h3>")
+[void]$sb.AppendLine("<table><tr><th>Category</th><th>Key Settings</th></tr>")
+$globalCats = [ordered]@{
+    "Security and Encryption" = try { Get-VBRSecurityOptions }    catch { $null }
+    "Notifications"           = try { Get-VBRNotificationOptions } catch { $null }
+    "Email"                   = try { Get-VBREmailOptions }        catch { $null }
+    "SNMP"                    = try { Get-VBRSNMPService }         catch { $null }
+    "Job History"             = try { Get-VBRJobHistoryOptions }   catch { $null }
+}
+foreach ($cat in $globalCats.Keys) {
+    $val = if ($globalCats[$cat]) { ($globalCats[$cat] | Out-String).Trim() } else { 'N/A' }
+    [void]$sb.AppendLine("<tr><td>$cat</td><td><pre>$val</pre></td></tr>")
+}
+[void]$sb.AppendLine("</table></div>")
+[void]$sb.AppendLine("  </div></div>")
+
+# ---- Section 02: License ----
+[void]$sb.AppendLine("<div class='section' id='sec-license'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>02</span><h2>License</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 if ($License) {
     $licData = [PSCustomObject]@{
-        Edition                  = $License.Edition
-        Type                     = $License.LicenseType
-        Status                   = $License.Status
-        'Expiration Date'        = $License.ExpirationDate?.ToString('yyyy-MM-dd')
-        'Support Expiry'         = $License.SupportExpirationDate?.ToString('yyyy-MM-dd')
-        'Used / Total Licenses'  = "$($License.UsedLicensesNumber) / $($License.TotalLicensesNumber)"
-        'Used Sockets'           = $License.UsedSocketsNumber
+        Edition           = $License.Edition
+        Type              = $License.LicenseType
+        Status            = $License.Status
+        'Expiration Date' = $License.ExpirationDate.ToString('yyyy-MM-dd')
+        'Support Expiry'  = $License.SupportExpirationDate.ToString('yyyy-MM-dd')
+        'Used / Total'    = "$($License.UsedLicensesNumber) / $($License.TotalLicensesNumber)"
+        'Used Sockets'    = $License.UsedSocketsNumber
     }
-    [void]$sb.AppendLine(($licData | ConvertTo-HtmlTable))
-} else {
-    [void]$sb.AppendLine("<p class='error'>Could not retrieve license information.</p>")
-}
-[void]$sb.AppendLine('</div>')
+    [void]$sb.AppendLine(($licData | ConvertTo-Html -Fragment))
+} else { [void]$sb.AppendLine("<p class='err'>Could not retrieve license information.</p>") }
+[void]$sb.AppendLine("  </div></div>")
 
-# ── Section 3: Infrastructure (Proxies) ──
-[void]$sb.AppendLine('<div class="section" id="sec-infra"><div class="section-header"><span class="section-num">03</span><h2>Backup Infrastructure</h2></div>')
+# ---- Section 03: Infrastructure ----
+[void]$sb.AppendLine("<div class='section' id='sec-infra'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>03</span><h2>Backup Infrastructure</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 
-[void]$sb.AppendLine('<div class="subsection"><h3>VMware Backup Proxies</h3>')
-if ($ViProxyData.Count -gt 0) {
-    [void]$sb.AppendLine(($ViProxyData | ConvertTo-HtmlTable))
+[void]$sb.AppendLine("<div class='subsection'><h3>VMware Backup Proxies</h3>")
+if ($ViProxies.Count -gt 0) {
+    $vpData = $ViProxies | ForEach-Object {
+        [PSCustomObject]@{
+            Name            = $_.Name
+            Host            = $_.Host.Name
+            'IP Address'    = Resolve-HostIP $_.Host.Name
+            'Transport Mode'= $_.Options.TransportMode
+            'Max Tasks'     = $_.MaxTasksCount
+            Status          = if ($_.IsDisabled) { 'Disabled' } else { 'Enabled' }
+        }
+    }
+    [void]$sb.AppendLine(($vpData | ConvertTo-Html -Fragment))
 } else { [void]$sb.AppendLine("<p class='empty'>No VMware proxies configured.</p>") }
-[void]$sb.AppendLine('</div>')
+[void]$sb.AppendLine("</div>")
 
-[void]$sb.AppendLine('<div class="subsection"><h3>Hyper-V Off-Host Processing Servers</h3>')
-if ($HvProxyData.Count -gt 0) {
-    [void]$sb.AppendLine(($HvProxyData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No Hyper-V off-host proxies configured.</p>") }
-[void]$sb.AppendLine('</div>')
+[void]$sb.AppendLine("<div class='subsection'><h3>Hyper-V Off-Host Proxies</h3>")
+if ($HvProxies.Count -gt 0) {
+    $hvpData = $HvProxies | ForEach-Object {
+        [PSCustomObject]@{
+            Name        = $_.Name
+            Host        = $_.Host.Name
+            'IP Address'= Resolve-HostIP $_.Host.Name
+            'Max Tasks' = $_.MaxTasksCount
+        }
+    }
+    [void]$sb.AppendLine(($hvpData | ConvertTo-Html -Fragment))
+} else { [void]$sb.AppendLine("<p class='empty'>No Hyper-V proxies configured.</p>") }
+[void]$sb.AppendLine("</div>")
 
-[void]$sb.AppendLine('<div class="subsection"><h3>NAS Backup Proxies</h3>')
-if ($NasProxyData.Count -gt 0) {
-    [void]$sb.AppendLine(($NasProxyData | ConvertTo-HtmlTable))
+[void]$sb.AppendLine("<div class='subsection'><h3>NAS Backup Proxies</h3>")
+if ($NasProxies.Count -gt 0) {
+    $npData = $NasProxies | ForEach-Object {
+        [PSCustomObject]@{
+            Name        = $_.Name
+            Server      = $_.Server.Name
+            'IP Address'= Resolve-HostIP $_.Server.Name
+            Description = $_.Description
+        }
+    }
+    [void]$sb.AppendLine(($npData | ConvertTo-Html -Fragment))
 } else { [void]$sb.AppendLine("<p class='empty'>No NAS proxies configured.</p>") }
-[void]$sb.AppendLine('</div></div>')
+[void]$sb.AppendLine("</div>")
 
-# ── Section 4: Repositories ──
-[void]$sb.AppendLine('<div class="section" id="sec-repos"><div class="section-header"><span class="section-num">04</span><h2>Repositories &amp; Storage</h2></div>')
+[void]$sb.AppendLine("  </div></div>")
 
-[void]$sb.AppendLine('<div class="subsection"><h3>Backup Repositories</h3>')
-if ($RepoData.Count -gt 0) {
-    [void]$sb.AppendLine(($RepoData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No backup repositories found.</p>") }
-[void]$sb.AppendLine('</div>')
+# ---- Section 04: Repositories ----
+[void]$sb.AppendLine("<div class='section' id='sec-repos'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>04</span><h2>Repositories &amp; Storage</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 
-[void]$sb.AppendLine('<div class="subsection"><h3>Scale-Out Backup Repositories (SOBR)</h3>')
+[void]$sb.AppendLine("<div class='subsection'><h3>Backup Repositories</h3>")
+if ($Repos.Count -gt 0) {
+    $repoData = $Repos | ForEach-Object {
+        $freeGB  = [math]::Round($_.FreeSpace  / 1GB, 1)
+        $totalGB = [math]::Round($_.TotalSpace / 1GB, 1)
+        $pct     = if ($totalGB -gt 0) { [math]::Round(($freeGB / $totalGB) * 100, 1) } else { 'N/A' }
+        [PSCustomObject]@{
+            Name         = $_.Name
+            Type         = $_.Type
+            Host         = $_.Host.Name
+            'IP Address' = Resolve-HostIP $_.Host.Name
+            Path         = $_.Path
+            'Total GB'   = $totalGB
+            'Free GB'    = $freeGB
+            'Free %'     = $pct
+            'Per-VM'     = $_.UsePerVMBackupFiles
+            Immutability = $_.ImmutabilityEnabled
+        }
+    }
+    [void]$sb.AppendLine(($repoData | ConvertTo-Html -Fragment))
+} else { [void]$sb.AppendLine("<p class='empty'>No repositories found.</p>") }
+[void]$sb.AppendLine("</div>")
+
+[void]$sb.AppendLine("<div class='subsection'><h3>Scale-Out Backup Repositories (SOBR)</h3>")
 if ($SOBRs.Count -gt 0) {
     $sobrData = $SOBRs | ForEach-Object {
         [PSCustomObject]@{
-            Name                  = $_.Name
-            Policy                = $_.PolicyType
-            'Active Extents'      = ($_.Extents | Where-Object { $_.IsActive } | Measure-Object).Count
-            'Capacity Tier'       = $_.CapacityTier.Enabled
-            'Archive Tier'        = $_.ArchiveTier.Enabled
+            Name            = $_.Name
+            Policy          = $_.PolicyType
+            'Active Extents'= ($_.Extents | Where-Object { $_.IsActive } | Measure-Object).Count
+            'Capacity Tier' = $_.CapacityTier.Enabled
+            'Archive Tier'  = $_.ArchiveTier.Enabled
         }
     }
-    [void]$sb.AppendLine(($sobrData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No Scale-Out Repositories configured.</p>") }
-[void]$sb.AppendLine('</div>')
+    [void]$sb.AppendLine(($sobrData | ConvertTo-Html -Fragment))
+} else { [void]$sb.AppendLine("<p class='empty'>No SOBRs configured.</p>") }
+[void]$sb.AppendLine("</div>")
 
-[void]$sb.AppendLine('<div class="subsection"><h3>External / Object Storage Repositories</h3>')
+[void]$sb.AppendLine("<div class='subsection'><h3>External / Object Storage</h3>")
 if ($ExtRepos.Count -gt 0) {
-    [void]$sb.AppendLine(($ExtRepos | Select-Object Name, Type, Description | ConvertTo-HtmlTable))
+    [void]$sb.AppendLine(($ExtRepos | Select-Object Name, Type, Description | ConvertTo-Html -Fragment))
 } else { [void]$sb.AppendLine("<p class='empty'>No external repositories configured.</p>") }
-[void]$sb.AppendLine('</div></div>')
+[void]$sb.AppendLine("</div>")
 
-# ── Section 5: Backup Jobs ──
-[void]$sb.AppendLine('<div class="section" id="sec-jobs"><div class="section-header"><span class="section-num">05</span><h2>Backup Jobs</h2></div>')
+[void]$sb.AppendLine("  </div></div>")
+
+# ---- Section 05: Backup Jobs ----
+[void]$sb.AppendLine("<div class='section' id='sec-jobs'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>05</span><h2>Backup Jobs</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 
 if ($BackupJobs.Count -gt 0) {
-    [void]$sb.AppendLine('<div class="subsection"><h3>Job Overview</h3>')
-    $jobOverview = $BackupJobs | ForEach-Object {
+    [void]$sb.AppendLine("<div class='subsection'><h3>Overview</h3>")
+    $jOverview = $BackupJobs | ForEach-Object {
         [PSCustomObject]@{
             Name        = $_.Name
             Enabled     = $_.IsScheduleEnabled
-            Repository  = try { $_.GetTargetRepository()?.Name } catch { 'N/A' }
+            Repository  = try { $_.GetTargetRepository().Name } catch { 'N/A' }
             Objects     = try { ($_.GetObjectsInJob() | Measure-Object).Count } catch { 0 }
             Description = $_.Description
         }
     }
-    [void]$sb.AppendLine(($jobOverview | ConvertTo-HtmlTable))
-    [void]$sb.AppendLine('</div>')
+    [void]$sb.AppendLine(($jOverview | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
 
-    if (-not $SkipJobDetails) {
-        [void]$sb.AppendLine('<div class="subsection"><h3>Detailed Job Configuration</h3>')
-        foreach ($job in $BackupJobs) {
-            $opts  = $null; try { $opts  = $job.GetOptions()     } catch { }
-            $sched = $null; try { $sched = $job.ScheduleOptions  } catch { }
-            $objs  = @();   try { $objs  = @($job.GetObjectsInJob()) } catch { }
-            $statusBadge = if ($job.IsScheduleEnabled) { Get-StatusBadge 'Success' } else { Get-StatusBadge 'Disabled' }
+    [void]$sb.AppendLine("<div class='subsection'><h3>Detailed Configuration - click to expand</h3>")
+    foreach ($job in $BackupJobs) {
+        $opts  = $null; try { $opts  = $job.GetOptions()         } catch { }
+        $sched = $null; try { $sched = $job.ScheduleOptions      } catch { }
+        $objs  = @();   try { $objs  = @($job.GetObjectsInJob()) } catch { }
+        $badge = if ($job.IsScheduleEnabled) { "<span class='badge b-ok'>Enabled</span>" } else { "<span class='badge b-neu'>Disabled</span>" }
 
-            [void]$sb.AppendLine("<div class='job-card'>")
-            [void]$sb.AppendLine("<div class='job-card-header'><span class='job-card-title'>$([System.Web.HttpUtility]::HtmlEncode($job.Name))</span>$statusBadge</div>")
-            [void]$sb.AppendLine("<div class='job-card-body'>")
-            [void]$sb.AppendLine("<div class='job-card-meta'><span>Type: $($job.JobType)</span><span>Repo: $(try{$job.GetTargetRepository()?.Name}catch{'N/A'})</span><span>Objects: $($objs.Count)</span></div>")
+        [void]$sb.AppendLine("<div class='job-card'>")
+        [void]$sb.AppendLine("  <div class='job-card-head'><span class='job-card-title'>$($job.Name)</span>$badge</div>")
+        [void]$sb.AppendLine("  <div class='job-card-body'>")
+        [void]$sb.AppendLine("    <div class='jmeta'><span>Type: $($job.JobType)</span><span>Repo: $(try{$job.GetTargetRepository().Name}catch{'N/A'})</span><span>Objects: $($objs.Count)</span></div>")
 
-            if ($objs.Count -gt 0) {
-                [void]$sb.AppendLine("<div class='inner-label'>Source Objects</div>")
-                $objData = $objs | ForEach-Object { [PSCustomObject]@{ Name = $_.Name; Type = $_.Type; Location = $_.Location } }
-                [void]$sb.AppendLine(($objData | ConvertTo-HtmlTable -EmptyMessage "No source objects."))
-            }
-
-            if ($opts) {
-                [void]$sb.AppendLine("<div class='inner-label'>Retention &amp; Storage</div>")
-                $retData = [PSCustomObject]@{
-                    'Retention Type'  = $opts.RetentionPolicy.Type
-                    'Retention Count' = $opts.RetentionPolicy.Quantity
-                    'GFS Enabled'     = $opts.RetentionPolicy.IsGFSEnabled
-                    'Weekly GFS'      = $opts.RetentionPolicy.WeeklyFullSchedule?.RepeatCount
-                    'Monthly GFS'     = $opts.RetentionPolicy.MonthlyFullSchedule?.RepeatCount
-                    'Yearly GFS'      = $opts.RetentionPolicy.YearlyFullSchedule?.RepeatCount
-                    'Dedup'           = $opts.JobOptions.EnableDeduplication
-                    'Compression'     = $opts.JobOptions.CompressionType
-                    'Encryption'      = $opts.JobOptions.EncryptionEnabled
-                }
-                [void]$sb.AppendLine(($retData | ConvertTo-HtmlTable))
-
-                [void]$sb.AppendLine("<div class='inner-label'>Guest Processing</div>")
-                $guestData = [PSCustomObject]@{
-                    'App-Aware'       = $opts.JobOptions.GenerationPolicy?.IsAppAwareEnabled
-                    'SQL Log Mode'    = $opts.JobOptions.GenerationPolicy?.SqlBackupMode
-                    'Oracle Log Mode' = $opts.JobOptions.GenerationPolicy?.OracleBackupMode
-                    'Index Files'     = $opts.JobOptions.GenerationPolicy?.FileSystemIndexingScope
-                }
-                [void]$sb.AppendLine(($guestData | ConvertTo-HtmlTable))
-            }
-
-            if ($sched) {
-                [void]$sb.AppendLine("<div class='inner-label'>Schedule</div>")
-                $schedData = [PSCustomObject]@{
-                    Enabled        = $sched.Enabled
-                    'Runs At'      = $sched.StartDateTime
-                    'Type'         = $sched.Type
-                    'Retry Count'  = $sched.RetryCount
-                    'Retry Wait'   = "$($sched.RetryTimeout) min"
-                    'Backup Window'= $sched.BackupWindowEnabled
-                }
-                [void]$sb.AppendLine(($schedData | ConvertTo-HtmlTable))
-            }
-
-            [void]$sb.AppendLine('</div></div>')
+        if ($objs.Count -gt 0) {
+            [void]$sb.AppendLine("<div class='ilabel'>Source Objects</div>")
+            $od = $objs | ForEach-Object { [PSCustomObject]@{ Name=$_.Name; Type=$_.Type; Location=$_.Location } }
+            [void]$sb.AppendLine(($od | ConvertTo-Html -Fragment))
         }
-        [void]$sb.AppendLine('</div>')
+        if ($opts) {
+            [void]$sb.AppendLine("<div class='ilabel'>Retention and Storage</div>")
+            $rd = [PSCustomObject]@{
+                'Retention Type' = $opts.RetentionPolicy.Type
+                'Restore Points' = $opts.RetentionPolicy.Quantity
+                'GFS Enabled'   = $opts.RetentionPolicy.IsGFSEnabled
+                Dedup            = $opts.JobOptions.EnableDeduplication
+                Compression      = $opts.JobOptions.CompressionType
+                Encryption       = $opts.JobOptions.EncryptionEnabled
+            }
+            [void]$sb.AppendLine(($rd | ConvertTo-Html -Fragment))
+        }
+        if ($sched) {
+            [void]$sb.AppendLine("<div class='ilabel'>Schedule</div>")
+            $sd = [PSCustomObject]@{
+                Enabled       = $sched.Enabled
+                Type          = $sched.Type
+                'Starts At'   = $sched.StartDateTime
+                'Retry Count' = $sched.RetryCount
+                'Retry Wait'  = "$($sched.RetryTimeout) min"
+            }
+            [void]$sb.AppendLine(($sd | ConvertTo-Html -Fragment))
+        }
+        [void]$sb.AppendLine("  </div></div>")
     }
-} else {
-    [void]$sb.AppendLine("<p class='empty'>No backup jobs found.</p>")
-}
-[void]$sb.AppendLine('</div>')
+    [void]$sb.AppendLine("</div>")
+} else { [void]$sb.AppendLine("<p class='empty'>No backup jobs found.</p>") }
 
-# ── Section 6: Backup Copy Jobs (FULL AUDIT) ──
-[void]$sb.AppendLine('<div class="section" id="sec-copyjobs"><div class="section-header"><span class="section-num">06</span><h2>Backup Copy Jobs - Audit</h2></div>')
-[void]$sb.AppendLine('<p class="section-pill">Full configuration &amp; last-session audit</p>')
+[void]$sb.AppendLine("  </div></div>")
+
+# ---- Section 06: Backup Copy Jobs - FULL AUDIT ----
+[void]$sb.AppendLine("<div class='section' id='sec-copy'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>06</span><h2>Backup Copy Jobs - Audit</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 
 if ($CopyJobs.Count -gt 0) {
 
-    # Overview table
-    [void]$sb.AppendLine('<div class="subsection"><h3>Copy Job Summary</h3>')
-    [void]$sb.AppendLine(($CopyJobAudit | ConvertTo-HtmlTable))
-    [void]$sb.AppendLine('</div>')
-
-    # Health check: any failed copy jobs?
+    # Alert for any failed copy jobs
     $failedCopy = $CopyJobAudit | Where-Object { $_.'Last Result' -eq 'Failed' }
     if ($failedCopy.Count -gt 0) {
-        [void]$sb.AppendLine('<div class="health-banner"><h3>▲ Failed Backup Copy Jobs</h3><ul>')
+        [void]$sb.AppendLine("<div class='hbanner'><h3>Failed Backup Copy Jobs</h3><ul>")
         foreach ($fc in $failedCopy) {
-            [void]$sb.AppendLine("<li>$([System.Web.HttpUtility]::HtmlEncode($fc.Name)) — Last ran: $($fc.'Last Run')</li>")
+            [void]$sb.AppendLine("<li>$($fc.Name) - Last ran: $($fc.'Last Run')</li>")
         }
-        [void]$sb.AppendLine('</ul></div>')
+        [void]$sb.AppendLine("</ul></div>")
     }
 
-    if (-not $SkipJobDetails) {
-        [void]$sb.AppendLine('<div class="subsection"><h3>Detailed Copy Job Configuration</h3>')
-        foreach ($job in $CopyJobs) {
-            $opts  = $null; try { $opts  = $job.GetOptions()       } catch { }
-            $sched = $null; try { $sched = $job.ScheduleOptions    } catch { }
+    [void]$sb.AppendLine("<div class='subsection'><h3>Copy Job Summary</h3>")
+    [void]$sb.AppendLine("<div class='abanner'><strong>Audit scope:</strong> Source repo, target repo, last session result, GB transferred, and 5-session history per job.</div>")
+    [void]$sb.AppendLine(($CopyJobAudit | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
 
-            # Last 5 sessions for audit trail
-            $sessions = @()
-            try { $sessions = @(Get-VBRJobSession -Job $job -Last 5 -ErrorAction SilentlyContinue) } catch { }
+    [void]$sb.AppendLine("<div class='subsection'><h3>Detailed Configuration and Session Audit - click to expand</h3>")
+    foreach ($job in $CopyJobs) {
+        $opts     = $null; try { $opts     = $job.GetOptions()    } catch { }
+        $sched    = $null; try { $sched    = $job.ScheduleOptions } catch { }
+        $sessions = @();   try { $sessions = @(Get-VBRJobSession -Job $job -Last 5 -ErrorAction SilentlyContinue) } catch { }
 
-            $statusBadge = if ($job.IsScheduleEnabled) { Get-StatusBadge 'Success' } else { Get-StatusBadge 'Disabled' }
+        $badge   = if ($job.IsScheduleEnabled) { "<span class='badge b-ok'>Enabled</span>" } else { "<span class='badge b-neu'>Disabled</span>" }
+        $srcRepo = try { ($job.GetSourceRepository()).Name } catch { 'N/A' }
+        $tgtRepo = try { $job.GetTargetRepository().Name   } catch { 'N/A' }
 
-            [void]$sb.AppendLine("<div class='job-card'>")
-            [void]$sb.AppendLine("<div class='job-card-header'><span class='job-card-title'>$([System.Web.HttpUtility]::HtmlEncode($job.Name))</span>$statusBadge</div>")
-            [void]$sb.AppendLine("<div class='job-card-body'>")
-            [void]$sb.AppendLine("<div class='job-card-meta'>")
-            [void]$sb.AppendLine("<span>Type: BackupCopy</span>")
-            [void]$sb.AppendLine("<span>Target: $(try{$job.GetTargetRepository()?.Name}catch{'N/A'})</span>")
-            [void]$sb.AppendLine("<span>Enabled: $($job.IsScheduleEnabled)</span>")
+        [void]$sb.AppendLine("<div class='job-card'>")
+        [void]$sb.AppendLine("  <div class='job-card-head'><span class='job-card-title'>$($job.Name)</span>$badge</div>")
+        [void]$sb.AppendLine("  <div class='job-card-body'>")
+        [void]$sb.AppendLine("    <div class='jmeta'><span>Type: Backup Copy</span><span>Source: $srcRepo</span><span>Target: $tgtRepo</span></div>")
+
+        if ($opts) {
+            [void]$sb.AppendLine("<div class='ilabel'>Retention and Storage</div>")
+            $rd = [PSCustomObject]@{
+                'Restore Points' = $opts.RetentionPolicy.Quantity
+                'GFS Enabled'    = $opts.RetentionPolicy.IsGFSEnabled
+                'Weekly GFS'     = $opts.RetentionPolicy.WeeklyFullSchedule.RepeatCount
+                'Monthly GFS'    = $opts.RetentionPolicy.MonthlyFullSchedule.RepeatCount
+                'Yearly GFS'     = $opts.RetentionPolicy.YearlyFullSchedule.RepeatCount
+                Encryption       = $opts.JobOptions.EncryptionEnabled
+            }
+            [void]$sb.AppendLine(($rd | ConvertTo-Html -Fragment))
+        }
+
+        if ($sched) {
+            [void]$sb.AppendLine("<div class='ilabel'>Schedule</div>")
+            $sd = [PSCustomObject]@{
+                Enabled       = $sched.Enabled
+                Type          = $sched.Type
+                'Retry Count' = $sched.RetryCount
+                'Retry Wait'  = "$($sched.RetryTimeout) min"
+            }
+            [void]$sb.AppendLine(($sd | ConvertTo-Html -Fragment))
+        }
+
+        [void]$sb.AppendLine("<div class='ilabel'>Last 5 Sessions - Audit Trail</div>")
+        if ($sessions.Count -gt 0) {
+            [void]$sb.AppendLine("<div class='audit-wrap'>")
+            $sessData = $sessions | ForEach-Object {
+                [PSCustomObject]@{
+                    Start         = $_.CreationTime.ToString('yyyy-MM-dd HH:mm')
+                    End           = $_.EndTime.ToString('yyyy-MM-dd HH:mm')
+                    Result        = $_.Result
+                    'Duration min'= [math]::Round(($_.EndTime - $_.CreationTime).TotalMinutes, 1)
+                    'Xfer GB'     = [math]::Round($_.Progress.TransferedSize / 1GB, 3)
+                    State         = $_.State
+                }
+            }
+            [void]$sb.AppendLine(($sessData | ConvertTo-Html -Fragment))
             [void]$sb.AppendLine("</div>")
-
-            # Retention
-            if ($opts) {
-                [void]$sb.AppendLine("<div class='inner-label'>Retention &amp; Storage</div>")
-                $retData = [PSCustomObject]@{
-                    'Restore Points'  = $opts.RetentionPolicy.Quantity
-                    'GFS Enabled'     = $opts.RetentionPolicy.IsGFSEnabled
-                    'Weekly GFS'      = $opts.RetentionPolicy.WeeklyFullSchedule?.RepeatCount
-                    'Monthly GFS'     = $opts.RetentionPolicy.MonthlyFullSchedule?.RepeatCount
-                    'Yearly GFS'      = $opts.RetentionPolicy.YearlyFullSchedule?.RepeatCount
-                    Encryption        = $opts.JobOptions.EncryptionEnabled
-                }
-                [void]$sb.AppendLine(($retData | ConvertTo-HtmlTable))
-            }
-
-            # Schedule
-            if ($sched) {
-                [void]$sb.AppendLine("<div class='inner-label'>Schedule</div>")
-                $schedData = [PSCustomObject]@{
-                    Enabled        = $sched.Enabled
-                    Type           = $sched.Type
-                    'Retry Count'  = $sched.RetryCount
-                    'Retry Wait'   = "$($sched.RetryTimeout) min"
-                    'Backup Window'= $sched.BackupWindowEnabled
-                }
-                [void]$sb.AppendLine(($schedData | ConvertTo-HtmlTable))
-            }
-
-            # Session audit trail
-            [void]$sb.AppendLine("<div class='inner-label'>Last 5 Sessions (Audit Trail)</div>")
-            if ($sessions.Count -gt 0) {
-                [void]$sb.AppendLine("<div class='audit-table-wrap'>")
-                $sessionData = $sessions | ForEach-Object {
-                    [PSCustomObject]@{
-                        'Start Time'     = $_.CreationTime.ToString('yyyy-MM-dd HH:mm')
-                        'End Time'       = $_.EndTime.ToString('yyyy-MM-dd HH:mm')
-                        Result           = $_.Result
-                        'Transferred GB' = [math]::Round($_.Progress.TransferedSize / 1GB, 3)
-                        'Duration (min)' = [math]::Round(($_.EndTime - $_.CreationTime).TotalMinutes, 1)
-                        State            = $_.State
-                    }
-                }
-                [void]$sb.AppendLine(($sessionData | ConvertTo-HtmlTable))
-                [void]$sb.AppendLine("</div>")
-            } else {
-                [void]$sb.AppendLine("<p class='empty'>No session history found for this job.</p>")
-            }
-
-            [void]$sb.AppendLine('</div></div>')
+        } else {
+            [void]$sb.AppendLine("<p class='empty'>No session history found.</p>")
         }
-        [void]$sb.AppendLine('</div>')
+
+        [void]$sb.AppendLine("  </div></div>")
     }
+    [void]$sb.AppendLine("</div>")
 } else {
     [void]$sb.AppendLine("<p class='empty'>No backup copy jobs configured.</p>")
 }
-[void]$sb.AppendLine('</div>')
 
-# ── Section 7: NAS Backup ──
-[void]$sb.AppendLine('<div class="section" id="sec-nas"><div class="section-header"><span class="section-num">07</span><h2>NAS Backup</h2></div>')
+[void]$sb.AppendLine("  </div></div>")
 
-[void]$sb.AppendLine('<div class="subsection"><h3>NAS Backup Jobs</h3>')
+# ---- Section 07: NAS Backup ----
+[void]$sb.AppendLine("<div class='section' id='sec-nas'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>07</span><h2>NAS Backup</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 if ($NasJobs.Count -gt 0) {
-    $nasJobData = $NasJobs | ForEach-Object {
+    $njData = $NasJobs | ForEach-Object {
         [PSCustomObject]@{
             Name        = $_.Name
             Enabled     = $_.IsScheduleEnabled
-            Repository  = $_.BackupRepository?.Name
-            'Copy Repo' = $_.CopyBackupRepository?.Name
+            Repository  = $_.BackupRepository.Name
+            'Copy Repo' = $_.CopyBackupRepository.Name
             Description = $_.Description
         }
     }
-    [void]$sb.AppendLine(($nasJobData | ConvertTo-HtmlTable))
+    [void]$sb.AppendLine(($njData | ConvertTo-Html -Fragment))
 } else { [void]$sb.AppendLine("<p class='empty'>No NAS backup jobs configured.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>File Shares</h3>')
 if ($FileShares.Count -gt 0) {
-    $shareData = $FileShares | ForEach-Object {
-        [PSCustomObject]@{
-            Name       = $_.Name
-            Path       = $_.Path
-            Type       = $_.ShareType
-            'Cache Repo'= $_.CacheRepository?.Name
-        }
+    [void]$sb.AppendLine("<div class='subsection' style='margin-top:16px'><h3>File Shares</h3>")
+    $fsData = $FileShares | ForEach-Object {
+        [PSCustomObject]@{ Name=$_.Name; Path=$_.Path; Type=$_.ShareType; 'Cache Repo'=$_.CacheRepository.Name }
     }
-    [void]$sb.AppendLine(($shareData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No file shares configured.</p>") }
-[void]$sb.AppendLine('</div></div>')
+    [void]$sb.AppendLine(($fsData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
+[void]$sb.AppendLine("  </div></div>")
 
-# ── Section 8: Replication & CDP ──
-[void]$sb.AppendLine('<div class="section" id="sec-replication"><div class="section-header"><span class="section-num">08</span><h2>Replication &amp; CDP</h2></div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Replication Jobs</h3>')
+# ---- Section 08: Replication & CDP ----
+[void]$sb.AppendLine("<div class='section' id='sec-repl'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>08</span><h2>Replication &amp; CDP</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 if ($ReplJobs.Count -gt 0) {
     $replData = $ReplJobs | ForEach-Object {
         [PSCustomObject]@{
             Name            = $_.Name
             Enabled         = $_.IsScheduleEnabled
             Target          = $_.Target
-            'Restore Points'= try { $_.GetOptions()?.RetentionPolicy?.Quantity } catch { 'N/A' }
+            'Restore Points'= try { $_.GetOptions().RetentionPolicy.Quantity } catch { 'N/A' }
             Description     = $_.Description
         }
     }
-    [void]$sb.AppendLine(($replData | ConvertTo-HtmlTable))
+    [void]$sb.AppendLine(($replData | ConvertTo-Html -Fragment))
 } else { [void]$sb.AppendLine("<p class='empty'>No replication jobs configured.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>CDP Policies</h3>')
 if ($CDPPolicies.Count -gt 0) {
-    $cdpData = $CDPPolicies | ForEach-Object {
-        [PSCustomObject]@{ Name = $_.Name; Enabled = $_.IsEnabled; Description = $_.Description }
-    }
-    [void]$sb.AppendLine(($cdpData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No CDP policies configured.</p>") }
-[void]$sb.AppendLine('</div></div>')
+    [void]$sb.AppendLine("<div class='subsection' style='margin-top:16px'><h3>CDP Policies</h3>")
+    [void]$sb.AppendLine(($CDPPolicies | Select-Object Name, IsEnabled, Description | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
+[void]$sb.AppendLine("  </div></div>")
 
-# ── Section 9: SureBackup ──
-[void]$sb.AppendLine('<div class="section" id="sec-surebackup"><div class="section-header"><span class="section-num">09</span><h2>SureBackup &amp; Recovery Verification</h2></div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Virtual Labs</h3>')
+# ---- Section 09: SureBackup ----
+[void]$sb.AppendLine("<div class='section' id='sec-sb'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>09</span><h2>SureBackup &amp; Recovery Verification</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 if ($VLabs.Count -gt 0) {
-    $vlabData = $VLabs | ForEach-Object {
-        [PSCustomObject]@{
-            Name   = $_.Name
-            Host   = $_.Host.Name
-            Status = $_.Status
-            Proxy  = $_.ProxyAppliance?.Name
-        }
+    [void]$sb.AppendLine("<div class='subsection'><h3>Virtual Labs</h3>")
+    $vlData = $VLabs | ForEach-Object {
+        [PSCustomObject]@{ Name=$_.Name; Host=$_.Host.Name; Status=$_.Status; Proxy=$_.ProxyAppliance.Name }
     }
-    [void]$sb.AppendLine(($vlabData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No virtual labs configured.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Application Groups</h3>')
+    [void]$sb.AppendLine(($vlData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
 if ($AppGroups.Count -gt 0) {
+    [void]$sb.AppendLine("<div class='subsection'><h3>Application Groups</h3>")
     $agData = $AppGroups | ForEach-Object {
         $vms = try { @($_.GetApplications()) } catch { @() }
-        [PSCustomObject]@{ Name = $_.Name; VMs = $vms.Count; Description = $_.Description }
+        [PSCustomObject]@{ Name=$_.Name; VMs=$vms.Count; Description=$_.Description }
     }
-    [void]$sb.AppendLine(($agData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No application groups configured.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>SureBackup Jobs</h3>')
+    [void]$sb.AppendLine(($agData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
 if ($SBJobs.Count -gt 0) {
+    [void]$sb.AppendLine("<div class='subsection'><h3>SureBackup Jobs</h3>")
     $sbData = $SBJobs | ForEach-Object {
-        [PSCustomObject]@{
-            Name          = $_.Name
-            Enabled       = $_.IsScheduleEnabled
-            'Virtual Lab' = $_.VirtualLab?.Name
-            Description   = $_.Description
-        }
+        [PSCustomObject]@{ Name=$_.Name; Enabled=$_.IsScheduleEnabled; 'Virtual Lab'=$_.VirtualLab.Name; Description=$_.Description }
     }
-    [void]$sb.AppendLine(($sbData | ConvertTo-HtmlTable))
+    [void]$sb.AppendLine(($sbData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
 } else { [void]$sb.AppendLine("<p class='empty'>No SureBackup jobs configured.</p>") }
-[void]$sb.AppendLine('</div></div>')
+[void]$sb.AppendLine("  </div></div>")
 
-# ── Section 10: Tape ──
-[void]$sb.AppendLine('<div class="section" id="sec-tape"><div class="section-header"><span class="section-num">10</span><h2>Tape Infrastructure</h2></div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Tape Libraries</h3>')
-if ($TapeLibraries.Count -gt 0) {
-    $tapeLibData = $TapeLibraries | ForEach-Object {
+# ---- Section 10: Tape ----
+[void]$sb.AppendLine("<div class='section' id='sec-tape'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>10</span><h2>Tape Infrastructure</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
+if ($TapeLibs.Count -gt 0) {
+    [void]$sb.AppendLine("<div class='subsection'><h3>Tape Libraries</h3>")
+    $tlData = $TapeLibs | ForEach-Object {
+        [PSCustomObject]@{ Name=$_.Name; State=$_.State; Model=$_.Model; Drives=($_.Drives | Measure-Object).Count; Slots=$_.TotalSlots }
+    }
+    [void]$sb.AppendLine(($tlData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
+if ($TapePools.Count -gt 0) {
+    [void]$sb.AppendLine("<div class='subsection'><h3>Tape Media Pools</h3>")
+    $tpData = $TapePools | ForEach-Object {
         [PSCustomObject]@{
-            Name   = $_.Name
-            State  = $_.State
-            Model  = $_.Model
-            Drives = ($_.Drives | Measure-Object).Count
-            Slots  = $_.TotalSlots
+            Name         = $_.Name
+            Type         = $_.Type
+            'Media Count'= try { ($_.GetTapeMedias() | Measure-Object).Count } catch { 'N/A' }
+            Retention    = $_.RetentionPolicy
         }
     }
-    [void]$sb.AppendLine(($tapeLibData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No tape libraries configured.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Tape Media Pools</h3>')
-if ($TapeMediaPools.Count -gt 0) {
-    $tapePoolData = $TapeMediaPools | ForEach-Object {
-        [PSCustomObject]@{
-            Name          = $_.Name
-            Type          = $_.Type
-            'Media Count' = try { ($_.GetTapeMedias() | Measure-Object).Count } catch { 'N/A' }
-            Retention     = $_.RetentionPolicy
-        }
-    }
-    [void]$sb.AppendLine(($tapePoolData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No tape media pools configured.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Tape Jobs</h3>')
+    [void]$sb.AppendLine(($tpData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
 if ($TapeJobs.Count -gt 0) {
-    $tapeJobData = $TapeJobs | ForEach-Object {
-        [PSCustomObject]@{
-            Name         = $_.Name
-            Type         = $_.Type
-            Enabled      = $_.Enabled
-            'Media Pool' = $_.MediaPool?.Name
-            Description  = $_.Description
-        }
+    [void]$sb.AppendLine("<div class='subsection'><h3>Tape Jobs</h3>")
+    $tjData = $TapeJobs | ForEach-Object {
+        [PSCustomObject]@{ Name=$_.Name; Type=$_.Type; Enabled=$_.Enabled; 'Media Pool'=$_.MediaPool.Name; Description=$_.Description }
     }
-    [void]$sb.AppendLine(($tapeJobData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No tape jobs configured.</p>") }
-[void]$sb.AppendLine('</div></div>')
+    [void]$sb.AppendLine(($tjData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+} else { [void]$sb.AppendLine("<p class='empty'>No tape infrastructure configured.</p>") }
+[void]$sb.AppendLine("  </div></div>")
 
-# ── Section 11: Cloud Connect ──
-[void]$sb.AppendLine('<div class="section" id="sec-cloud"><div class="section-header"><span class="section-num">11</span><h2>Cloud Connect</h2></div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Cloud Tenants</h3>')
+# ---- Section 11: Cloud Connect ----
+[void]$sb.AppendLine("<div class='section' id='sec-cloud'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>11</span><h2>Cloud Connect</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 if ($CloudTenants.Count -gt 0) {
-    $tenantData = $CloudTenants | ForEach-Object {
+    $ctData = $CloudTenants | ForEach-Object {
         [PSCustomObject]@{
-            Name               = $_.Name
-            Enabled            = $_.Enabled
-            'Lease Expiration' = $_.LeaseExpirationDate?.ToString('yyyy-MM-dd')
-            Description        = $_.Description
+            Name           = $_.Name
+            Enabled        = $_.Enabled
+            'Lease Expiry' = $_.LeaseExpirationDate.ToString('yyyy-MM-dd')
+            Description    = $_.Description
         }
     }
-    [void]$sb.AppendLine(($tenantData | ConvertTo-HtmlTable))
+    [void]$sb.AppendLine(($ctData | ConvertTo-Html -Fragment))
 } else { [void]$sb.AppendLine("<p class='empty'>No cloud tenants configured.</p>") }
-[void]$sb.AppendLine('</div>')
+[void]$sb.AppendLine("  </div></div>")
 
-[void]$sb.AppendLine('<div class="subsection"><h3>Cloud Hardware Plans</h3>')
-if ($CloudHardware.Count -gt 0) {
-    [void]$sb.AppendLine(($CloudHardware | Select-Object Name, CPU, Memory, Storage | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No hardware plans configured.</p>") }
-[void]$sb.AppendLine('</div></div>')
-
-# ── Section 12: Inventory ──
-[void]$sb.AppendLine('<div class="section" id="sec-inventory"><div class="section-header"><span class="section-num">12</span><h2>Inventory</h2></div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>VMware vSphere Servers</h3>')
+# ---- Section 12: Inventory ----
+[void]$sb.AppendLine("<div class='section' id='sec-inv'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>12</span><h2>Inventory</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 if ($ViServers.Count -gt 0) {
+    [void]$sb.AppendLine("<div class='subsection'><h3>VMware vSphere Servers</h3>")
     $viSrvData = $ViServers | ForEach-Object {
-        [PSCustomObject]@{
-            Name         = $_.Name
-            'IP Address' = Resolve-HostIP $_.Name
-            Type         = $_.Type
-            DNS          = $_.DNSName
-            Connected    = $_.IsConnected
-        }
+        [PSCustomObject]@{ Name=$_.Name; 'IP Address'=Resolve-HostIP $_.Name; Type=$_.Type; DNS=$_.DNSName; Connected=$_.IsConnected }
     }
-    [void]$sb.AppendLine(($viSrvData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No vSphere servers added.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Hyper-V Servers</h3>')
+    [void]$sb.AppendLine(($viSrvData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
 if ($HvServers.Count -gt 0) {
+    [void]$sb.AppendLine("<div class='subsection'><h3>Hyper-V Servers</h3>")
     $hvSrvData = $HvServers | ForEach-Object {
-        [PSCustomObject]@{
-            Name         = $_.Name
-            'IP Address' = Resolve-HostIP $_.Name
-            DNS          = $_.DNSName
-            Connected    = $_.IsConnected
-        }
+        [PSCustomObject]@{ Name=$_.Name; 'IP Address'=Resolve-HostIP $_.Name; DNS=$_.DNSName; Connected=$_.IsConnected }
     }
-    [void]$sb.AppendLine(($hvSrvData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>No Hyper-V servers added.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Stored Credentials (Names Only - No Passwords)</h3>')
+    [void]$sb.AppendLine(($hvSrvData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
 if ($Credentials.Count -gt 0) {
-    [void]$sb.AppendLine(($Credentials | ConvertTo-HtmlTable -EmptyMessage "No credentials found."))
-} else { [void]$sb.AppendLine("<p class='empty'>No credentials stored.</p>") }
-[void]$sb.AppendLine('</div></div>')
+    [void]$sb.AppendLine("<div class='subsection'><h3>Stored Credentials - Names Only</h3>")
+    [void]$sb.AppendLine(($Credentials | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
+[void]$sb.AppendLine("  </div></div>")
 
-# ── Section 13: Global Settings ──
-[void]$sb.AppendLine('<div class="section" id="sec-global"><div class="section-header"><span class="section-num">13</span><h2>Global Settings</h2></div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Notification Options</h3>')
+# ---- Section 13: Global Settings ----
+[void]$sb.AppendLine("<div class='section' id='sec-global'>")
+[void]$sb.AppendLine("  <div class='section-head'><span class='sec-num'>13</span><h2>Global Settings</h2></div>")
+[void]$sb.AppendLine("  <div class='section-body'>")
 if ($NotifOpts) {
-    $notifData = [PSCustomObject]@{
+    [void]$sb.AppendLine("<div class='subsection'><h3>Notification Options</h3>")
+    $nData = [PSCustomObject]@{
         'Send on Success' = $NotifOpts.SendSuccessEmail
         'Send on Warning' = $NotifOpts.SendWarningEmail
         'Send on Failure' = $NotifOpts.SendFailureEmail
         'Notify on Retry' = $NotifOpts.SendNotificationOnLastRetryFailure
     }
-    [void]$sb.AppendLine(($notifData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>Could not retrieve notification settings.</p>") }
-[void]$sb.AppendLine('</div>')
-
-[void]$sb.AppendLine('<div class="subsection"><h3>Email Settings</h3>')
+    [void]$sb.AppendLine(($nData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
 if ($EmailOpts) {
-    $emailData = [PSCustomObject]@{
-        'SMTP Server'    = $EmailOpts.SMTPServer
-        'SMTP Port'      = $EmailOpts.SMTPPort
-        From             = $EmailOpts.From
-        To               = $EmailOpts.To
-        SSL              = $EmailOpts.EnableSSL
-        'Use Auth'       = $EmailOpts.UseAuthentication
+    [void]$sb.AppendLine("<div class='subsection'><h3>Email Settings</h3>")
+    $eData = [PSCustomObject]@{
+        'SMTP Server' = $EmailOpts.SMTPServer
+        'SMTP Port'   = $EmailOpts.SMTPPort
+        From          = $EmailOpts.From
+        To            = $EmailOpts.To
+        SSL           = $EmailOpts.EnableSSL
+        'Use Auth'    = $EmailOpts.UseAuthentication
     }
-    [void]$sb.AppendLine(($emailData | ConvertTo-HtmlTable))
-} else { [void]$sb.AppendLine("<p class='empty'>Email notifications not configured or cmdlet unavailable.</p>") }
-[void]$sb.AppendLine('</div></div>')
+    [void]$sb.AppendLine(($eData | ConvertTo-Html -Fragment))
+    [void]$sb.AppendLine("</div>")
+}
+[void]$sb.AppendLine("  </div></div>")
 
-# ── Footer ──
-[void]$sb.AppendLine(@"
-</div></div>
-<div class="footer-accent-bar"></div>
-<div class="report-footer">
-  <div class="footer-brand">
-    <strong>The Redesign Group</strong>
-    <span>Technology &amp; Cybersecurity Consulting</span>
-    <span>redesign-group.com</span>
-  </div>
-  <div class="footer-center">
-    Veeam B&amp;R v13 As-Built Report v3.0 &nbsp;|&nbsp; $ReportDate
-  </div>
-  <div class="footer-right">
-    $([System.Web.HttpUtility]::HtmlEncode($CustomerName))<br>
-    Server: $($BkpServer.Name ?? 'Unknown')
-  </div>
-</div>
-<script>$JS</script>
-</body></html>
-"@)
+# ---- Close layout + Footer ----
+[void]$sb.AppendLine("</div></div>")
+[void]$sb.AppendLine("<div class='accent-bar'></div>")
+[void]$sb.AppendLine("<div class='rg-footer'>")
+[void]$sb.AppendLine("  <div class='fb'><strong>The Redesign Group</strong><span>Technology &amp; Cybersecurity Consulting</span><span>redesign-group.com</span></div>")
+[void]$sb.AppendLine("  <div class='fc'>Veeam B&amp;R v13 As-Built Report v3.1 | $ReportDate</div>")
+[void]$sb.AppendLine("  <div class='fr'>$CustomerName<br>Server: $($BkpServer.Name ?? 'Unknown')</div>")
+[void]$sb.AppendLine("</div>")
+[void]$sb.AppendLine("<script>$JS</script>")
+[void]$sb.AppendLine("</body></html>")
 
-# ─── 6. WRITE OUTPUT ─────────────────────────────────────────────────────────
+# =============================================================================
+# SAVE
+# =============================================================================
 
+$FilePath = "$OutputPath\$ReportName-$CustomerName-$(Get-Date -Format 'yyyyMMdd-HHmm').html"
 New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
-$FilePath = Join-Path $OutputPath "Veeam-v13-AsBuilt-$CustomerName-$ReportDateISO.html"
-$sb.ToString() | Out-File -FilePath $FilePath -Encoding UTF8 -Force
+$sb.ToString() | Out-File -FilePath $FilePath -Encoding UTF8
 
 Write-Host ""
-Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-Write-Host "  ✅  Report saved: $FilePath" -ForegroundColor Green
-Write-Host "  🏢  Branded for: $CustomerName  |  Prepared by: $PreparedBy" -ForegroundColor Cyan
+Write-Host "========================================================" -ForegroundColor Cyan
+Write-Host "  Report saved: $FilePath" -ForegroundColor Green
+Write-Host "  Customer: $CustomerName  |  Prepared by: $PreparedBy" -ForegroundColor Cyan
 if ($HealthCheck -and $Warnings.Count -gt 0) {
-    Write-Host "  ⚠   $($Warnings.Count) health warning(s) - review the report." -ForegroundColor Yellow
+    Write-Host "  $($Warnings.Count) health warning(s) found - review the report." -ForegroundColor Yellow
 }
-Write-Host "  📄  Open in any browser.  Ctrl+P -> Save as PDF." -ForegroundColor Cyan
-Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+Write-Host "  Open in any browser. Ctrl+P to export as PDF." -ForegroundColor Cyan
+Write-Host "========================================================" -ForegroundColor Cyan
