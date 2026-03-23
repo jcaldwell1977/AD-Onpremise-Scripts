@@ -1,8 +1,8 @@
 # =============================================================================
-# VEEAM BACKUP & REPLICATION v13 – AS-BUILT REPORT GENERATOR
+# VEEAM BACKUP & REPLICATION v13 - AS-BUILT REPORT GENERATOR
 # Version 3.0 | Redesign Group Branded | Full Coverage
 #
-# Produced by The Redesign Group – Global Technology & Cybersecurity Consulting
+# Produced by The Redesign Group - Global Technology & Cybersecurity Consulting
 # https://redesign-group.com | Data Protection Practice
 #
 # Usage:
@@ -21,7 +21,7 @@
 
 param(
     [string]$OutputPath   = "C:\AsBuiltReports",
-    [string]$ReportTitle  = "Veeam Backup & Replication v13 – As-Built Report",
+    [string]$ReportTitle  = "Veeam Backup & Replication v13 - As-Built Report",
     [string]$CustomerName = "Customer",          # Client/customer name shown in header
     [string]$PreparedBy   = "The Redesign Group",
     [switch]$HealthCheck,
@@ -100,7 +100,7 @@ $CSS = @'
 
 /* ── Redesign Group Brand Tokens ── */
 :root {
-    /* Core palette – derived from redesign-group.com */
+    /* Core palette - derived from redesign-group.com */
     --rg-black:       #0a0a0a;
     --rg-dark:        #111111;
     --rg-dark-2:      #181818;
@@ -108,7 +108,7 @@ $CSS = @'
     --rg-border:      #2a2a2a;
     --rg-border-lt:   #333333;
 
-    /* Redesign accent – their gradient goes teal→green */
+    /* Redesign accent - their gradient goes teal->green */
     --rg-teal:        #00c4a0;
     --rg-green:       #4ade80;
     --rg-accent:      #00c4a0;
@@ -151,7 +151,7 @@ body {
     overflow: hidden;
 }
 
-/* Subtle animated gradient mesh – nod to RG hero */
+/* Subtle animated gradient mesh - nod to RG hero */
 .report-header::before {
     content: '';
     position: absolute;
@@ -917,7 +917,7 @@ $sb = [System.Text.StringBuilder]::new()
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>$ReportTitle – $CustomerName</title>
+<title>$ReportTitle - $CustomerName</title>
 <style>$CSS</style>
 </head>
 <body>
@@ -1173,7 +1173,7 @@ if ($BackupJobs.Count -gt 0) {
 [void]$sb.AppendLine('</div>')
 
 # ── Section 6: Backup Copy Jobs (FULL AUDIT) ──
-[void]$sb.AppendLine('<div class="section" id="sec-copyjobs"><div class="section-header"><span class="section-num">06</span><h2>Backup Copy Jobs – Audit</h2></div>')
+[void]$sb.AppendLine('<div class="section" id="sec-copyjobs"><div class="section-header"><span class="section-num">06</span><h2>Backup Copy Jobs - Audit</h2></div>')
 [void]$sb.AppendLine('<p class="section-pill">Full configuration &amp; last-session audit</p>')
 
 if ($CopyJobs.Count -gt 0) {
@@ -1472,7 +1472,7 @@ if ($HvServers.Count -gt 0) {
 } else { [void]$sb.AppendLine("<p class='empty'>No Hyper-V servers added.</p>") }
 [void]$sb.AppendLine('</div>')
 
-[void]$sb.AppendLine('<div class="subsection"><h3>Stored Credentials (Names Only – No Passwords)</h3>')
+[void]$sb.AppendLine('<div class="subsection"><h3>Stored Credentials (Names Only - No Passwords)</h3>')
 if ($Credentials.Count -gt 0) {
     [void]$sb.AppendLine(($Credentials | ConvertTo-HtmlTable -EmptyMessage "No credentials found."))
 } else { [void]$sb.AppendLine("<p class='empty'>No credentials stored.</p>") }
@@ -1540,7 +1540,7 @@ Write-Host "━━━━━━━━━━━━━━━━━━━━━━�
 Write-Host "  ✅  Report saved: $FilePath" -ForegroundColor Green
 Write-Host "  🏢  Branded for: $CustomerName  |  Prepared by: $PreparedBy" -ForegroundColor Cyan
 if ($HealthCheck -and $Warnings.Count -gt 0) {
-    Write-Host "  ⚠   $($Warnings.Count) health warning(s) – review the report." -ForegroundColor Yellow
+    Write-Host "  ⚠   $($Warnings.Count) health warning(s) - review the report." -ForegroundColor Yellow
 }
-Write-Host "  📄  Open in any browser.  Ctrl+P → Save as PDF." -ForegroundColor Cyan
+Write-Host "  📄  Open in any browser.  Ctrl+P -> Save as PDF." -ForegroundColor Cyan
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
