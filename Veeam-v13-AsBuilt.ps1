@@ -517,11 +517,13 @@ if ($ExtRepos.Count -gt 0) {
 if ($BackupJobs.Count -gt 0) {
     [void]$sb.AppendLine("<div class='subsection'><h3>Overview</h3>")
     $jOverview = $BackupJobs | ForEach-Object {
+        $jRepo = $null; try { $jRepo = $_.GetTargetRepository().Name } catch { $jRepo = 'N/A' }
+        $jObjs = 0;    try { $jObjs = ($_.GetObjectsInJob() | Measure-Object).Count } catch { $jObjs = 0 }
         [PSCustomObject]@{
             Name        = $_.Name
             Enabled     = $_.IsScheduleEnabled
-            Repository  = try { $_.GetTargetRepository().Name } catch { 'N/A' }
-            Objects     = try { ($_.GetObjectsInJob() | Measure-Object).Count } catch { 0 }
+            Repository  = $jRepo
+            Objects     = $jObjs
             Description = $_.Description
         }
     }
@@ -696,11 +698,12 @@ if ($FileShares.Count -gt 0) {
 [void]$sb.AppendLine("  <div class='section-body'>")
 if ($ReplJobs.Count -gt 0) {
     $replData = $ReplJobs | ForEach-Object {
+        $rPoints = 'N/A'; try { $rPoints = $_.GetOptions().RetentionPolicy.Quantity } catch { }
         [PSCustomObject]@{
             Name            = $_.Name
             Enabled         = $_.IsScheduleEnabled
             Target          = $_.Target
-            'Restore Points'= try { $_.GetOptions().RetentionPolicy.Quantity } catch { 'N/A' }
+            'Restore Points'= $rPoints
             Description     = $_.Description
         }
     }
@@ -728,7 +731,7 @@ if ($VLabs.Count -gt 0) {
 if ($AppGroups.Count -gt 0) {
     [void]$sb.AppendLine("<div class='subsection'><h3>Application Groups</h3>")
     $agData = $AppGroups | ForEach-Object {
-        $vms = try { @($_.GetApplications()) } catch { @() }
+        $vms = @(); try { $vms = @($_.GetApplications()) } catch { }
         [PSCustomObject]@{ Name=$_.Name; VMs=$vms.Count; Description=$_.Description }
     }
     [void]$sb.AppendLine(($agData | ConvertTo-Html -Fragment))
@@ -759,10 +762,11 @@ if ($TapeLibs.Count -gt 0) {
 if ($TapePools.Count -gt 0) {
     [void]$sb.AppendLine("<div class='subsection'><h3>Tape Media Pools</h3>")
     $tpData = $TapePools | ForEach-Object {
+        $mCount = 'N/A'; try { $mCount = ($_.GetTapeMedias() | Measure-Object).Count } catch { }
         [PSCustomObject]@{
             Name         = $_.Name
             Type         = $_.Type
-            'Media Count'= try { ($_.GetTapeMedias() | Measure-Object).Count } catch { 'N/A' }
+            'Media Count'= $mCount
             Retention    = $_.RetentionPolicy
         }
     }
