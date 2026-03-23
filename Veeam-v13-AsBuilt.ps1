@@ -370,12 +370,17 @@ $srvTable = Get-VBRServer | Where-Object { $_.Type -eq 'Local' } | ForEach-Objec
 
 [void]$sb.AppendLine("<div class='subsection' style='margin-top:20px'><h3>Global Options</h3>")
 [void]$sb.AppendLine("<table><tr><th>Category</th><th>Key Settings</th></tr>")
+$gSecOpts  = $null; try { $gSecOpts  = Get-VBRSecurityOptions }    catch { }
+$gNotif    = $null; try { $gNotif    = Get-VBRNotificationOptions } catch { }
+$gEmail    = $null; try { $gEmail    = Get-VBREmailOptions }        catch { }
+$gSNMP     = $null; try { $gSNMP     = Get-VBRSNMPService }         catch { }
+$gHistory  = $null; try { $gHistory  = Get-VBRJobHistoryOptions }   catch { }
 $globalCats = [ordered]@{
-    "Security and Encryption" = try { Get-VBRSecurityOptions }    catch { $null }
-    "Notifications"           = try { Get-VBRNotificationOptions } catch { $null }
-    "Email"                   = try { Get-VBREmailOptions }        catch { $null }
-    "SNMP"                    = try { Get-VBRSNMPService }         catch { $null }
-    "Job History"             = try { Get-VBRJobHistoryOptions }   catch { $null }
+    "Security and Encryption" = $gSecOpts
+    "Notifications"           = $gNotif
+    "Email"                   = $gEmail
+    "SNMP"                    = $gSNMP
+    "Job History"             = $gHistory
 }
 foreach ($cat in $globalCats.Keys) {
     $val = if ($globalCats[$cat]) { ($globalCats[$cat] | Out-String).Trim() } else { 'N/A' }
