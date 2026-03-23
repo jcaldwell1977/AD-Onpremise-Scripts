@@ -227,20 +227,30 @@ $NotifOpts   = $null; try { $NotifOpts = Get-VBRNotificationOptions }    catch {
 $EmailOpts   = $null; try { $EmailOpts = Get-VBREmailOptions }           catch { }
 
 # Build backup copy job audit records
+# Use Get-VBRBackupCopyJobSession for jobs fetched via Get-VBRBackupCopyJob
 $CopyJobAudit = $CopyJobs | ForEach-Object {
     $j = $_
     $last = $null
-    try { $last = Get-VBRJobSession -Job $j -Last 1 -ErrorAction SilentlyContinue } catch { }
-    $srcRepo = try { ($j.GetSourceRepository()).Name } catch { 'N/A' }
-    $tgtRepo = try { $j.GetTargetRepository().Name   } catch { 'N/A' }
+    try { $last = Get-VBRBackupCopyJobSession -Job $j -Last 1 -ErrorAction SilentlyContinue } catch { }
+    if (-not $last) { try { $last = Get-VBRJobSession -Job $j -Last 1 -ErrorAction SilentlyContinue } catch { } }
+    $srcRepo = $null; try { $srcRepo = ($j.GetSourceRepository()).Name } catch { $srcRepo = 'N/A' }
+    $tgtRepo = $null; try { $tgtRepo = $j.GetTargetRepository().Name   } catch { $tgtRepo = 'N/A' }
+    $lastResult = 'No Sessions'
+    $lastRun    = 'Never'
+    $xferGB     = 0
+    if ($last) {
+        $lastResult = if ($last.Result)  { $last.Result.ToString() } else { 'Unknown' }
+        $lastRun    = if ($last.EndTime) { $last.EndTime.ToString('yyyy-MM-dd HH:mm') } else { 'In Progress' }
+        $xferGB     = try { [math]::Round($last.Progress.TransferedSize / 1GB, 2) } catch { 0 }
+    }
     [PSCustomObject]@{
         Name          = $j.Name
         Enabled       = $j.IsScheduleEnabled
         'Source Repo' = $srcRepo
         'Target Repo' = $tgtRepo
-        'Last Result' = if ($last) { $last.Result } else { 'No Sessions' }
-        'Last Run'    = if ($last -and $last.EndTime) { $last.EndTime.ToString('yyyy-MM-dd HH:mm') } else { 'Never' }
-        'Xfer GB'     = if ($last) { [math]::Round($last.Progress.TransferedSize / 1GB, 2) } else { 0 }
+        'Last Result' = $lastResult
+        'Last Run'    = $lastRun
+        'Xfer GB'     = $xferGB
         Description   = $j.Description
     }
 }
@@ -467,20 +477,44 @@ if ($NasProxies.Count -gt 0) {
 [void]$sb.AppendLine("<div class='subsection'><h3>Backup Repositories</h3>")
 if ($Repos.Count -gt 0) {
     $repoData = $Repos | ForEach-Object {
-        $freeGB  = [math]::Round($_.FreeSpace  / 1GB, 1)
-        $totalGB = [math]::Round($_.TotalSpace / 1GB, 1)
-        $pct     = if ($totalGB -gt 0) { [math]::Round(($freeGB / $totalGB) * 100, 1) } else { 'N/A' }
+        $repo = $_
+        # Try GetContainer() first for live capacity data, fall back to properties
+        $totalGB = 'N/A'
+        $freeGB  = 'N/A'
+        $pct     = 'N/A'
+        $usedGB  = 'N/A'
+        try {
+            $container = $repo.GetContainer()
+            if ($container -and $container.CachedTotalSpace.InGigabytes -gt 0) {
+                $totalGB = [math]::Round($container.CachedTotalSpace.InGigabytes, 1)
+                $freeGB  = [math]::Round($container.CachedFreeSpace.InGigabytes, 1)
+                $usedGB  = [math]::Round($totalGB - $freeGB, 1)
+                $pct     = [math]::Round(($freeGB / $totalGB) * 100, 1)
+            }
+        } catch { }
+        # Fallback to direct properties if container returned zeros
+        if ($totalGB -eq 'N/A' -or $totalGB -eq 0) {
+            try {
+                if ($repo.TotalSpace -gt 0) {
+                    $totalGB = [math]::Round($repo.TotalSpace / 1GB, 1)
+                    $freeGB  = [math]::Round($repo.FreeSpace  / 1GB, 1)
+                    $usedGB  = [math]::Round($totalGB - $freeGB, 1)
+                    $pct     = [math]::Round(($freeGB / $totalGB) * 100, 1)
+                }
+            } catch { }
+        }
         [PSCustomObject]@{
-            Name         = $_.Name
-            Type         = $_.Type
-            Host         = $_.Host.Name
-            'IP Address' = Resolve-HostIP $_.Host.Name
-            Path         = $_.Path
+            Name         = $repo.Name
+            Type         = $repo.Type
+            Host         = $repo.Host.Name
+            'IP Address' = Resolve-HostIP $repo.Host.Name
+            Path         = $repo.Path
             'Total GB'   = $totalGB
+            'Used GB'    = $usedGB
             'Free GB'    = $freeGB
             'Free %'     = $pct
-            'Per-VM'     = $_.UsePerVMBackupFiles
-            Immutability = $_.ImmutabilityEnabled
+            'Per-VM'     = $repo.UsePerVMBackupFiles
+            Immutability = $repo.ImmutabilityEnabled
         }
     }
     [void]$sb.AppendLine(($repoData | ConvertTo-Html -Fragment))
@@ -604,7 +638,9 @@ if ($CopyJobs.Count -gt 0) {
     foreach ($job in $CopyJobs) {
         $opts     = $null; try { $opts     = $job.GetOptions()    } catch { }
         $sched    = $null; try { $sched    = $job.ScheduleOptions } catch { }
-        $sessions = @();   try { $sessions = @(Get-VBRJobSession -Job $job -Last 5 -ErrorAction SilentlyContinue) } catch { }
+        $sessions = @()
+        try { $sessions = @(Get-VBRBackupCopyJobSession -Job $job -Last 5 -ErrorAction SilentlyContinue) } catch { }
+        if ($sessions.Count -eq 0) { try { $sessions = @(Get-VBRJobSession -Job $job -Last 5 -ErrorAction SilentlyContinue) } catch { } }
 
         $badge   = if ($job.IsScheduleEnabled) { "<span class='badge b-ok'>Enabled</span>" } else { "<span class='badge b-neu'>Disabled</span>" }
         $srcRepo = try { ($job.GetSourceRepository()).Name } catch { 'N/A' }
