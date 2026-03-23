@@ -199,10 +199,11 @@ Write-Host "Collecting Veeam configuration data..." -ForegroundColor Cyan
 
 $BkpServer   = $null; try { $BkpServer   = Get-VBRServer | Where-Object { $_.Type -eq 'Local' } | Select-Object -First 1 } catch { }
 $License     = $null; try { $License     = Get-VBRInstalledLicense } catch { }
-$AllJobs     = @();   try { $AllJobs     = @(Get-VBRJob) } catch { }
-$BackupJobs  = $AllJobs | Where-Object { $_.JobType -eq 'Backup' }
-$CopyJobs    = $AllJobs | Where-Object { $_.JobType -eq 'BackupSync' }
-$ReplJobs    = $AllJobs | Where-Object { $_.JobType -in @('Replica','SimpleTransactionLog') }
+# v13 correct cmdlets - suppress deprecation warnings
+$BackupJobs  = @(); try { $BackupJobs = @(Get-VBRJob -WarningAction SilentlyContinue | Where-Object { $_.JobType -eq 'Backup' }) } catch { }
+$CopyJobs    = @(); try { $CopyJobs   = @(Get-VBRBackupCopyJob -WarningAction SilentlyContinue) } catch { try { $CopyJobs = @(Get-VBRJob -WarningAction SilentlyContinue | Where-Object { $_.JobType -eq 'BackupSync' }) } catch { } }
+$ReplJobs    = @(); try { $ReplJobs   = @(Get-VBRJob -WarningAction SilentlyContinue | Where-Object { $_.JobType -in @('Replica','SimpleTransactionLog') }) } catch { }
+$AllJobs     = @($BackupJobs) + @($CopyJobs) + @($ReplJobs)
 $NasJobs     = @(); try { $NasJobs     = @(Get-VBRNASBackupJob) }         catch { }
 $TapeJobs    = @(); try { $TapeJobs    = @(Get-VBRTapeJob) }              catch { }
 $ViProxies   = @(); try { $ViProxies   = @(Get-VBRViProxy) }             catch { }
@@ -238,7 +239,7 @@ $CopyJobAudit = $CopyJobs | ForEach-Object {
         'Source Repo' = $srcRepo
         'Target Repo' = $tgtRepo
         'Last Result' = if ($last) { $last.Result } else { 'No Sessions' }
-        'Last Run'    = if ($last) { $last.EndTime.ToString('yyyy-MM-dd HH:mm') } else { 'Never' }
+        'Last Run'    = if ($last -and $last.EndTime) { $last.EndTime.ToString('yyyy-MM-dd HH:mm') } else { 'Never' }
         'Xfer GB'     = if ($last) { [math]::Round($last.Progress.TransferedSize / 1GB, 2) } else { 0 }
         Description   = $j.Description
     }
@@ -398,8 +399,8 @@ if ($License) {
         Edition           = $License.Edition
         Type              = $License.LicenseType
         Status            = $License.Status
-        'Expiration Date' = $License.ExpirationDate.ToString('yyyy-MM-dd')
-        'Support Expiry'  = $License.SupportExpirationDate.ToString('yyyy-MM-dd')
+        'Expiration Date' = if ($License.ExpirationDate) { $License.ExpirationDate.ToString('yyyy-MM-dd') } else { 'N/A' }
+        'Support Expiry'  = if ($License.SupportExpirationDate) { $License.SupportExpirationDate.ToString('yyyy-MM-dd') } else { 'N/A' }
         'Used / Total'    = "$($License.UsedLicensesNumber) / $($License.TotalLicensesNumber)"
         'Used Sockets'    = $License.UsedSocketsNumber
     }
@@ -643,8 +644,8 @@ if ($CopyJobs.Count -gt 0) {
             [void]$sb.AppendLine("<div class='audit-wrap'>")
             $sessData = $sessions | ForEach-Object {
                 [PSCustomObject]@{
-                    Start         = $_.CreationTime.ToString('yyyy-MM-dd HH:mm')
-                    End           = $_.EndTime.ToString('yyyy-MM-dd HH:mm')
+                    Start         = if ($_.CreationTime) { $_.CreationTime.ToString('yyyy-MM-dd HH:mm') } else { 'N/A' }
+                    End           = if ($_.EndTime) { $_.EndTime.ToString('yyyy-MM-dd HH:mm') } else { 'Running' }
                     Result        = $_.Result
                     'Duration min'= [math]::Round(($_.EndTime - $_.CreationTime).TotalMinutes, 1)
                     'Xfer GB'     = [math]::Round($_.Progress.TransferedSize / 1GB, 3)
@@ -792,7 +793,7 @@ if ($CloudTenants.Count -gt 0) {
         [PSCustomObject]@{
             Name           = $_.Name
             Enabled        = $_.Enabled
-            'Lease Expiry' = $_.LeaseExpirationDate.ToString('yyyy-MM-dd')
+            'Lease Expiry' = if ($_.LeaseExpirationDate) { $_.LeaseExpirationDate.ToString('yyyy-MM-dd') } else { 'N/A' }
             Description    = $_.Description
         }
     }
