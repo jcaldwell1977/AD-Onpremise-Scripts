@@ -1,8 +1,7 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    VDI Golden Image Health Check Report — Generic / Interactive
-
+    VDI Golden Image Health Check Report — Interactive
 .DESCRIPTION
     Generates a timestamped HTML health report for any Horizon VDI environment.
     Prompts the user for all environment-specific values at runtime.
