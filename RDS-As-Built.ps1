@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Extremely Detailed RDS As-Built with FSLogix Profile Disks + Full RD Gateway Config
+   Detailed Professional RDS As-Built Documentation (HTML)
+    Includes: Deployment, Servers, RD Gateway, RD Web Access, Collections, FSLogix
 #>
 
 param (
@@ -8,10 +9,10 @@ param (
 )
 
 $ReportDate = Get-Date -Format "yyyy-MM-dd_HH-mm"
-$ReportFolder = Join-Path $OutputPath "RDS_AsBuilt_UltraDetailed_$ReportDate"
+$ReportFolder = Join-Path $OutputPath "RDS_AsBuilt_Professional_$ReportDate"
 New-Item -ItemType Directory -Path $ReportFolder -Force | Out-Null
 
-$HtmlPath = Join-Path $ReportFolder "RDS_AsBuilt_Full_Report.html"
+$HtmlPath = Join-Path $ReportFolder "RDS_AsBuilt_Professional_Report.html"
 $LogPath  = Join-Path $ReportFolder "RDS_AsBuilt_Log.txt"
 
 function Write-Log {
@@ -20,103 +21,179 @@ function Write-Log {
     "$timestamp - $Message" | Tee-Object -FilePath $LogPath -Append
 }
 
-Write-Log "Starting Ultra-Detailed RDS As-Built..."
+Write-Log "Starting Professional RDS As-Built HTML Report..."
 
 Import-Module RemoteDesktop -ErrorAction SilentlyContinue
 if (-not (Get-Module RemoteDesktop)) {
-    Write-Log "ERROR: RemoteDesktop module not available."
+    Write-Host "ERROR: Run this script on a Connection Broker server." -ForegroundColor Red
     exit 1
 }
 
-# ========================== HTML Start ==========================
+# ========================== PROFESSIONAL HTML HEADER ==========================
 $Html = @"
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>RDS Ultra-Detailed As-Built</title>
+    <meta charset="UTF-8">
+    <title>RDS Environment - Professional As-Built</title>
     <style>
-        body { font-family: Segoe UI, Arial; margin: 30px; background: #f9f9f9; }
-        h1, h2, h3 { color: #003366; }
-        table { border-collapse: collapse; width: 100%; margin: 15px 0; }
-        th, td { border: 1px solid #555; padding: 9px; text-align: left; }
-        th { background: #003366; color: white; }
-        .section { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 30px; }
+        @import url('https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;500;600&display=swap');
+        
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 40px;
+            background: #f8f9fa;
+            color: #333;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1300px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 25px rgba(0,0,0,0.12);
+        }
+        h1 {
+            color: #003366;
+            text-align: center;
+            border-bottom: 4px solid #003366;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        h2 {
+            color: #003366;
+            border-left: 6px solid #003366;
+            padding-left: 18px;
+            background: #f0f4f8;
+            padding-top: 12px;
+            padding-bottom: 12px;
+            margin-top: 45px;
+        }
+        h3 {
+            color: #0055aa;
+            margin-top: 35px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 18px 0;
+        }
+        th, td {
+            padding: 12px 15px;
+            border: 1px solid #ccc;
+            text-align: left;
+        }
+        th {
+            background-color: #003366;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .section {
+            margin-bottom: 55px;
+        }
+        .header-info {
+            text-align: center;
+            margin-bottom: 40px;
+            color: #555;
+            font-size: 1.1em;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 80px;
+            color: #777;
+            font-size: 0.95em;
+        }
     </style>
 </head>
 <body>
-    <h1>Remote Desktop Services - Ultra Detailed As-Built</h1>
-    <p><strong>Generated:</strong> $(Get-Date) | <strong>Server:</strong> $env:COMPUTERNAME</p>
+    <div class="container">
+        <h1>Remote Desktop Services (RDS)<br>As-Built Documentation</h1>
+        <div class="header-info">
+            <p><strong>Generated:</strong> $(Get-Date -Format "MMMM dd, yyyy HH:mm") &nbsp;&nbsp;|&nbsp;&nbsp; 
+               <strong>Server:</strong> $env:COMPUTERNAME</p>
+        </div>
 "@
 
 # 1. Deployment Overview
 $Deployment = Get-RDDeployment
 $Html += @"
-<div class="section">
-    <h2>1. RDS Deployment Overview</h2>
-    <table><tr><th>Property</th><th>Value</th></tr>
+        <div class="section">
+            <h2>1. Deployment Overview</h2>
+            <table>
+                <tr><th>Property</th><th>Value</th></tr>
 "@
-$Deployment.PSObject.Properties | ForEach-Object {
-    $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+if ($Deployment) {
+    $Deployment.PSObject.Properties | ForEach-Object {
+        $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+    }
 }
 $Html += "</table></div>"
 
 # 2. RDS Servers & Roles
 $Html += @"
-<div class="section">
-    <h2>2. RDS Servers and Roles</h2>
-    <table><tr><th>Server</th><th>Roles</th></tr>
+        <div class="section">
+            <h2>2. RDS Servers and Roles</h2>
+            <table>
+                <tr><th>Server Name</th><th>Roles</th></tr>
 "@
 Get-RDServer | ForEach-Object {
     $Html += "<tr><td>$($_.Server)</td><td>$($_.Roles -join ', ')</td></tr>"
 }
 $Html += "</table></div>"
 
-# 3. RD Gateway - Detailed Configuration
-Write-Log "Gathering detailed RD Gateway configuration..."
+# 3. RD Gateway
 $Html += @"
-<div class="section">
-    <h2>3. RD Gateway Configuration</h2>
+        <div class="section">
+            <h2>3. RD Gateway Configuration</h2>
 "@
-
 $Gateways = Get-RDGatewayServer
 if ($Gateways) {
     foreach ($gw in $Gateways) {
         $Html += "<h3>Gateway Server: $($gw.Server)</h3>"
-        
-        # Basic Gateway Info
         $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
         $gw.PSObject.Properties | ForEach-Object {
             $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
         }
         $Html += "</table>"
-
-        # Advanced Gateway Settings
-        try {
-            $GwConfig = Get-RDGatewayConfiguration -ErrorAction Stop
-            $Html += "<h4>Gateway Advanced Settings</h4><table><tr><th>Property</th><th>Value</th></tr>"
-            $GwConfig.PSObject.Properties | ForEach-Object {
-                $value = if ($null -eq $_.Value) { "N/A" } else { $_.Value }
-                $Html += "<tr><td>$($_.Name)</td><td>$value</td></tr>"
-            }
-            $Html += "</table>"
-        } catch {}
     }
 } else {
-    $Html += "<p>No RD Gateway servers configured.</p>"
+    $Html += "<p>No RD Gateway configured.</p>"
 }
 $Html += "</div>"
 
-# 4. Session Collections (Detailed)
-$Collections = Get-RDSessionCollection
+# 4. RD Web Access
 $Html += @"
-<div class="section">
-    <h2>4. RDS Session Collections & Assignments</h2>
+        <div class="section">
+            <h2>4. Remote Desktop Web Access</h2>
 "@
+$WebServers = Get-RDServer | Where-Object { $_.Roles -like "*RD-Web-Access*" }
+if ($WebServers) {
+    foreach ($wa in $WebServers) {
+        $Html += "<h3>Web Access Server: $($wa.Server)</h3>"
+        $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
+        $wa.PSObject.Properties | ForEach-Object {
+            $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+        }
+        $Html += "</table>"
+    }
+} else {
+    $Html += "<p>No RD Web Access role found.</p>"
+}
+$Html += "</div>"
 
-foreach ($col in $Collections) {
+# 5. Session Collections
+$Html += @"
+        <div class="section">
+            <h2>5. RDS Session Collections & Assignments</h2>
+"@
+foreach ($col in Get-RDSessionCollection) {
     $ColName = $col.CollectionName
     $Config = Get-RDSessionCollectionConfiguration -CollectionName $ColName
-    $UserGroups = (Get-RDSessionCollectionConfiguration -CollectionName $ColName -UserGroup).UserGroup
+    $Groups = (Get-RDSessionCollectionConfiguration -CollectionName $ColName -UserGroup).UserGroup
 
     $Html += "<h3>Collection: $ColName</h3>"
     $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
@@ -126,90 +203,61 @@ foreach ($col in $Collections) {
     }
     $Html += "</table>"
 
-    # User/Group Assignments
-    $Html += "<h4>Assigned User Groups</h4><table><tr><th>Group</th></tr>"
-    if ($UserGroups) {
-        $UserGroups | ForEach-Object { $Html += "<tr><td>$_</td></tr>" }
+    $Html += "<h4>Assigned User Groups</h4><table><tr><th>Group Name</th></tr>"
+    if ($Groups) {
+        $Groups | ForEach-Object { $Html += "<tr><td>$_</td></tr>" }
     } else {
         $Html += "<tr><td>None</td></tr>"
     }
     $Html += "</table>"
-
-    # Published RemoteApps
-    $Apps = Get-RDRemoteApp -CollectionName $ColName -ErrorAction SilentlyContinue
-    if ($Apps.Count -gt 0) {
-        $Html += "<h4>Published RemoteApps</h4><table><tr><th>Display Name</th><th>Alias</th><th>Path</th></tr>"
-        $Apps | ForEach-Object {
-            $Html += "<tr><td>$($_.DisplayName)</td><td>$($_.Alias)</td><td>$($_.FilePath)</td></tr>"
-        }
-        $Html += "</table>"
-    }
 }
 $Html += "</div>"
 
-# 5. FSLogix - Extremely Detailed (Profiles + Office + Disk Info)
-Write-Log "Scanning FSLogix configuration across Session Hosts..."
-$SessionHosts = (Get-RDSessionHost).SessionHost
-
+# 6. FSLogix Profile Configuration
 $Html += @"
-<div class="section">
-    <h2>5. FSLogix Profile Disk Configuration</h2>
+        <div class="section">
+            <h2>6. FSLogix Profile Disk Configuration</h2>
 "@
-
+$SessionHosts = (Get-RDSessionHost).SessionHost
 foreach ($sh in $SessionHosts) {
     $Html += "<h3>Session Host: $sh</h3>"
 
-    # FSLogix Profiles
     $Profiles = Invoke-Command -ComputerName $sh -ScriptBlock {
         Get-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" -ErrorAction SilentlyContinue
     } -ErrorAction SilentlyContinue
 
     if ($Profiles) {
-        $Html += "<h4>FSLogix Profiles Settings</h4><table><tr><th>Setting</th><th>Value</th></tr>"
+        $Html += "<table><tr><th>Setting</th><th>Value</th></tr>"
         $Profiles.PSObject.Properties | Where-Object {$_.Name -notlike "PS*"} | ForEach-Object {
             $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
         }
         $Html += "</table>"
-
-        # Profile Disk Details
-        if ($Profiles.VHDLocations) {
-            $Html += "<h4>Profile Disk Locations</h4><p>$($Profiles.VHDLocations)</p>"
-        }
-        if ($Profiles.VHDXSizeBytes) {
-            $sizeGB = [math]::Round($Profiles.VHDXSizeBytes / 1GB, 2)
-            $Html += "<p><strong>Max Profile Disk Size:</strong> $sizeGB GB</p>"
-        }
     } else {
-        $Html += "<p>No FSLogix Profiles configuration found on this host.</p>"
-    }
-
-    # FSLogix Office Container
-    $Office = Invoke-Command -ComputerName $sh -ScriptBlock {
-        Get-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\OfficeContainers" -ErrorAction SilentlyContinue
-    } -ErrorAction SilentlyContinue
-
-    if ($Office) {
-        $Html += "<h4>FSLogix Office Container Settings</h4><table><tr><th>Setting</th><th>Value</th></tr>"
-        $Office.PSObject.Properties | Where-Object {$_.Name -notlike "PS*"} | ForEach-Object {
-            $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
-        }
-        $Html += "</table>"
+        $Html += "<p>No FSLogix Profiles configuration found.</p>"
     }
 }
-
 $Html += "</div>"
 
-# Close HTML
-$Html += "</body></html>"
+# Footer
+$Html += @"
+        <div class="footer">
+            <p><strong>Professional RDS As-Built Documentation</strong> — Confidential</p>
+            <p>Generated by PowerShell Script • $(Get-Date -Format "MMMM dd, yyyy")</p>
+        </div>
+    </div>
+</body>
+</html>
+"@
 
-# Save Report
+# Save the Professional HTML Report
 $Html | Out-File -FilePath $HtmlPath -Encoding UTF8
 
-# Export useful CSVs
+# Export CSVs for reference
+Get-RDServer | Export-Csv "$ReportFolder\RDS_Servers.csv" -NoTypeInformation
 Get-RDSessionCollectionConfiguration | Export-Csv "$ReportFolder\Collection_Configs.csv" -NoTypeInformation
-Get-RDRemoteApp | Export-Csv "$ReportFolder\RemoteApps.csv" -NoTypeInformation
-Get-RDGatewayServer | Export-Csv "$ReportFolder\RDGateway_Servers.csv" -NoTypeInformation
 
-Write-Log "Ultra-detailed RDS As-Built completed successfully!"
-Write-Host "`nDetailed RDS As-Built report generated and opened." -ForegroundColor Green
+Write-Log "Professional HTML As-Built report generated successfully!"
+Write-Host "`n✅ Professional RDS As-Built HTML report has been generated!" -ForegroundColor Green
+Write-Host "📁 Location: $HtmlPath" -ForegroundColor Cyan
+
 Invoke-Item $HtmlPath
