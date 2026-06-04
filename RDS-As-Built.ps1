@@ -1,26 +1,18 @@
 <#
 .SYNOPSIS
-    Generates a detailed As-Built documentation for a Remote Desktop Services (RDS) environment.
-
-.OUTPUT
-    Creates a nicely formatted HTML report + CSV exports in the specified folder.
-
-.EXAMPLE
-    .\Get-RDSAsBuilt.ps1 -OutputPath "C:\RDS_AsBuilt"
+     Detailed RDS As-Built Documentation including Collections, Assignments, and FSLogix
 #>
 
 param (
-    [Parameter(Mandatory=$false)]
     [string]$OutputPath = "C:\RDS_AsBuilt"
 )
 
-# Create output folder
 $ReportDate = Get-Date -Format "yyyy-MM-dd_HH-mm"
-$ReportFolder = Join-Path $OutputPath "RDS_AsBuilt_$ReportDate"
+$ReportFolder = Join-Path $OutputPath "RDS_AsBuilt_Detailed_$ReportDate"
 New-Item -ItemType Directory -Path $ReportFolder -Force | Out-Null
 
-$HtmlPath = Join-Path $ReportFolder "RDS_AsBuilt_Report.html"
-$LogPath   = Join-Path $ReportFolder "RDS_AsBuilt_Log.txt"
+$HtmlPath = Join-Path $ReportFolder "RDS_AsBuilt_Full_Report.html"
+$LogPath  = Join-Path $ReportFolder "RDS_AsBuilt_Log.txt"
 
 function Write-Log {
     param([string]$Message)
@@ -28,176 +20,173 @@ function Write-Log {
     "$timestamp - $Message" | Tee-Object -FilePath $LogPath -Append
 }
 
-Write-Log "Starting RDS As-Built documentation..."
+Write-Log "Starting Extremely Detailed RDS As-Built..."
 
-# Import RDS Module
 Import-Module RemoteDesktop -ErrorAction SilentlyContinue
-if (-not (Get-Module -Name RemoteDesktop)) {
-    Write-Log "ERROR: RemoteDesktop module not found. Please run this script on an RDS Connection Broker server."
+if (-not (Get-Module RemoteDesktop)) {
+    Write-Log "ERROR: RemoteDesktop module not available. Run on Connection Broker."
     exit 1
 }
 
-# HTML Header
+# ========================== HTML Start ==========================
 $Html = @"
 <!DOCTYPE html>
 <html>
 <head>
-    <title>RDS Environment As-Built - $env:COMPUTERNAME</title>
+    <title>RDS Environment - Detailed As-Built</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        h1, h2 { color: #003366; }
+        body { font-family: Segoe UI, Arial; margin: 30px; background: #f9f9f9; }
+        h1, h2, h3 { color: #003366; }
         table { border-collapse: collapse; width: 100%; margin: 15px 0; }
-        th, td { border: 1px solid #999; padding: 8px; text-align: left; }
-        th { background-color: #003366; color: white; }
-        .section { margin-top: 30px; }
+        th, td { border: 1px solid #555; padding: 8px; }
+        th { background: #003366; color: white; }
+        .section { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 25px; }
     </style>
 </head>
 <body>
-    <h1>Remote Desktop Services - As-Built Documentation</h1>
-    <p><strong>Generated:</strong> $(Get-Date)</p>
-    <p><strong>Server:</strong> $env:COMPUTERNAME</p>
+    <h1>Remote Desktop Services - Detailed As-Built Documentation</h1>
+    <p><strong>Generated:</strong> $(Get-Date) | <strong>Server:</strong> $env:COMPUTERNAME</p>
 "@
 
-# 1. RDS Deployment Overview
-Write-Log "Gathering RDS Deployment Information..."
-$Deployment = Get-RDDeployment -ErrorAction SilentlyContinue
-
+# 1. Deployment Overview
+$Deployment = Get-RDDeployment
 $Html += @"
-    <div class="section">
-        <h2>1. RDS Deployment Overview</h2>
-        <table>
-            <tr><th>Property</th><th>Value</th></tr>
+<div class="section">
+    <h2>1. RDS Deployment Overview</h2>
+    <table>
+        <tr><th>Property</th><th>Value</th></tr>
 "@
 if ($Deployment) {
     $Deployment.PSObject.Properties | ForEach-Object {
         $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
     }
-} else {
-    $Html += "<tr><td colspan='2'>No deployment information found.</td></tr>"
 }
 $Html += "</table></div>"
 
-# 2. Connection Brokers
-Write-Log "Gathering Connection Brokers..."
-$CBs = Get-RDConnectionBrokerHighAvailability -ErrorAction SilentlyContinue
+# 2. RDS Servers & Roles
 $Html += @"
-    <div class="section">
-        <h2>2. Connection Broker Servers</h2>
-        <table>
-            <tr><th>Server</th><th>Role</th><th>Status</th></tr>
+<div class="section">
+    <h2>2. RDS Servers and Roles</h2>
+    <table>
+        <tr><th>Server</th><th>Roles</th></tr>
 "@
-foreach ($cb in (Get-RDServer | Where-Object {$_.Roles -like "*Connection Broker*"})) {
-    $Html += "<tr><td>$($cb.Server)</td><td>Connection Broker</td><td>Active</td></tr>"
+Get-RDServer | ForEach-Object {
+    $Html += "<tr><td>$($_.Server)</td><td>$($_.Roles -join ', ')</td></tr>"
 }
 $Html += "</table></div>"
 
-# 3. Session Hosts
-Write-Log "Gathering Session Hosts..."
-$SessionHosts = Get-RDSessionHost
+# 3. Connection Brokers
 $Html += @"
-    <div class="section">
-        <h2>3. Session Host Servers</h2>
-        <table>
-            <tr><th>Server</th><th>Status</th><th>Number of Sessions</th><th>Drain Mode</th></tr>
+<div class="section">
+    <h2>3. Connection Broker High Availability</h2>
 "@
-foreach ($sh in $SessionHosts) {
-    $sessions = (Get-RDUserSession -CollectionName "*" -ConnectionBroker $sh.SessionHost | Measure-Object).Count
-    $Html += "<tr><td>$($sh.SessionHost)</td><td>$($sh.Status)</td><td>$sessions</td><td>$($sh.DrainMode)</td></tr>"
-}
-$Html += "</table></div>"
-
-# 4. Collections
-Write-Log "Gathering Session Collections..."
-$Collections = Get-RDSessionCollection
-
-$Html += @"
-    <div class="section">
-        <h2>4. RDS Collections</h2>
-"@
-foreach ($col in $Collections) {
-    $Html += "<h3>Collection: $($col.CollectionName)</h3>"
-    $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
-    $col.PSObject.Properties | ForEach-Object {
-        $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
-    }
-    $Html += "</table>"
-
-    # Users in collection
-    $Users = Get-RDUserSession -CollectionName $col.CollectionName -ErrorAction SilentlyContinue
-    if ($Users) {
-        $Html += "<h4>Active Sessions</h4><table><tr><th>User</th><th>Server</th><th>Session State</th><th>Client IP</th></tr>"
-        foreach ($u in $Users) {
-            $Html += "<tr><td>$($u.UserName)</td><td>$($u.HostServer)</td><td>$($u.SessionState)</td><td>$($u.ClientIPAddress)</td></tr>"
-        }
-        $Html += "</table>"
+Get-RDConnectionBrokerHighAvailability | ForEach-Object {
+    $_.PSObject.Properties | ForEach-Object {
+        $Html += "<p><strong>$($_.Name):</strong> $($_.Value)</p>"
     }
 }
 $Html += "</div>"
 
-# 5. RD Gateway
-Write-Log "Gathering RD Gateway configuration..."
-$Gateway = Get-RDGatewayServer | Select-Object * -ErrorAction SilentlyContinue
+# 4. Session Collections - Extremely Detailed
+Write-Log "Gathering detailed Collection information..."
+$Collections = Get-RDSessionCollection
 
 $Html += @"
-    <div class="section">
-        <h2>5. RD Gateway Servers</h2>
-        <table>
-            <tr><th>Server</th><th>Status</th><th>Logon Method</th></tr>
+<div class="section">
+    <h2>4. RDS Session Collections</h2>
 "@
-if ($Gateway) {
-    foreach ($gw in $Gateway) {
-        $Html += "<tr><td>$($gw.Server)</td><td>$($gw.Status)</td><td>$($gw.LogonMethod)</td></tr>"
+
+foreach ($col in $Collections) {
+    $ColName = $col.CollectionName
+    $Config = Get-RDSessionCollectionConfiguration -CollectionName $ColName
+    $UserGroups = Get-RDSessionCollectionConfiguration -CollectionName $ColName -UserGroup | Select-Object -ExpandProperty UserGroup
+
+    $Html += "<h3>Collection: $ColName</h3>"
+    $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
+
+    $Config.PSObject.Properties | Where-Object {$_.Name -notlike "*UserGroup*"} | ForEach-Object {
+        $value = if ($_.Value -is [array]) { $_.Value -join "; " } else { $_.Value }
+        $Html += "<tr><td>$($_.Name)</td><td>$value</td></tr>"
     }
-} else {
-    $Html += "<tr><td colspan='3'>No RD Gateway configured or accessible.</td></tr>"
-}
-$Html += "</table></div>"
+    $Html += "</table>"
 
-# 6. Licensing
-Write-Log "Gathering Licensing Information..."
-$Licensing = Get-RDLicenseConfiguration -ErrorAction SilentlyContinue
+    # User/Group Assignments
+    $Html += "<h4>User Group Assignments</h4><table><tr><th>Assigned Groups</th></tr>"
+    if ($UserGroups) {
+        $UserGroups | ForEach-Object { $Html += "<tr><td>$_</td></tr>" }
+    } else {
+        $Html += "<tr><td>No groups assigned</td></tr>"
+    }
+    $Html += "</table>"
 
-$Html += @"
-    <div class="section">
-        <h2>6. RDS Licensing</h2>
-        <table>
-            <tr><th>Property</th><th>Value</th></tr>
-"@
-if ($Licensing) {
-    $Licensing.PSObject.Properties | ForEach-Object {
-        $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+    # Published RemoteApps
+    $Apps = Get-RDRemoteApp -CollectionName $ColName -ErrorAction SilentlyContinue
+    if ($Apps) {
+        $Html += "<h4>Published RemoteApps</h4><table><tr><th>Display Name</th><th>Alias</th><th>Path</th><th>Show in Web</th></tr>"
+        $Apps | ForEach-Object {
+            $Html += "<tr><td>$($_.DisplayName)</td><td>$($_.Alias)</td><td>$($_.FilePath)</td><td>$($_.ShowInWebAccess)</td></tr>"
+        }
+        $Html += "</table>"
     }
 }
-$Html += "</table></div>"
 
-# 7. Certificates
-Write-Log "Gathering Certificates..."
+$Html += "</div>"
+
+# 5. FSLogix Detection (Very Detailed)
+Write-Log "Scanning for FSLogix configuration..."
+$SessionHosts = (Get-RDSessionHost).SessionHost
+
 $Html += @"
-    <div class="section">
-        <h2>7. RDS Certificates</h2>
-        <table>
-            <tr><th>Role</th><th>Thumbprint</th><th>Subject</th><th>Expiration</th></tr>
+<div class="section">
+    <h2>5. FSLogix Configuration</h2>
 "@
-Get-RDCertificate | ForEach-Object {
-    $Html += "<tr><td>$($_.Role)</td><td>$($_.Thumbprint)</td><td>$($_.Subject)</td><td>$($_.ExpiresOn)</td></tr>"
-}
-$Html += "</table></div>"
 
-# Close HTML
+foreach ($sh in $SessionHosts) {
+    $Html += "<h3>Session Host: $sh</h3>"
+    
+    # Profiles
+    $ProfilesReg = Invoke-Command -ComputerName $sh -ScriptBlock {
+        Get-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" -ErrorAction SilentlyContinue
+    } -ErrorAction SilentlyContinue
+
+    if ($ProfilesReg) {
+        $Html += "<h4>FSLogix Profiles</h4><table><tr><th>Setting</th><th>Value</th></tr>"
+        $ProfilesReg.PSObject.Properties | Where-Object {$_.Name -notlike "PS*"} | ForEach-Object {
+            $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+        }
+        $Html += "</table>"
+    } else {
+        $Html += "<p><strong>No FSLogix Profiles configuration found.</strong></p>"
+    }
+
+    # Office Containers
+    $OfficeReg = Invoke-Command -ComputerName $sh -ScriptBlock {
+        Get-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\OfficeContainers" -ErrorAction SilentlyContinue
+    } -ErrorAction SilentlyContinue
+
+    if ($OfficeReg) {
+        $Html += "<h4>FSLogix Office Containers</h4><table><tr><th>Setting</th><th>Value</th></tr>"
+        $OfficeReg.PSObject.Properties | Where-Object {$_.Name -notlike "PS*"} | ForEach-Object {
+            $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+        }
+        $Html += "</table>"
+    }
+}
+
+$Html += "</div>"
+
+# Finalize HTML
 $Html += "</body></html>"
 
-# Save HTML Report
+# Save Report
 $Html | Out-File -FilePath $HtmlPath -Encoding UTF8
 
-# Export CSVs
-Get-RDSessionHost | Export-Csv "$ReportFolder\SessionHosts.csv" -NoTypeInformation
+# Export CSVs for raw data
 Get-RDSessionCollection | Export-Csv "$ReportFolder\Collections.csv" -NoTypeInformation
-Get-RDUserSession -ErrorAction SilentlyContinue | Export-Csv "$ReportFolder\CurrentSessions.csv" -NoTypeInformation
+Get-RDSessionCollectionConfiguration | Export-Csv "$ReportFolder\Collection_Configs.csv" -NoTypeInformation
+Get-RDRemoteApp | Export-Csv "$ReportFolder\RemoteApps.csv" -NoTypeInformation
 
-Write-Log "RDS As-Built documentation completed successfully!"
-Write-Log "Report saved to: $HtmlPath"
+Write-Log "Detailed RDS As-Built completed!"
+Write-Host "Full detailed report generated at: $HtmlPath" -ForegroundColor Green
 
-# Open the report
 Invoke-Item $HtmlPath
-
-Write-Host "`nRDS As-Built report has been generated and opened." -ForegroundColor Green
