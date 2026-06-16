@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
    Detailed Professional RDS As-Built Documentation (HTML)
-    Includes: Deployment, Servers, RD Gateway, RD Web Access, Collections, FSLogix
+   Includes: Deployment (via servers/roles), RD Gateway, RD Web Access, Collections, FSLogix
 #>
 
 param (
@@ -11,9 +11,8 @@ param (
 $ReportDate = Get-Date -Format "yyyy-MM-dd_HH-mm"
 $ReportFolder = Join-Path $OutputPath "RDS_AsBuilt_Professional_$ReportDate"
 New-Item -ItemType Directory -Path $ReportFolder -Force | Out-Null
-
 $HtmlPath = Join-Path $ReportFolder "RDS_AsBuilt_Professional_Report.html"
-$LogPath  = Join-Path $ReportFolder "RDS_AsBuilt_Log.txt"
+$LogPath = Join-Path $ReportFolder "RDS_AsBuilt_Log.txt"
 
 function Write-Log {
     param([string]$Message)
@@ -25,7 +24,7 @@ Write-Log "Starting Professional RDS As-Built HTML Report..."
 
 Import-Module RemoteDesktop -ErrorAction SilentlyContinue
 if (-not (Get-Module RemoteDesktop)) {
-    Write-Host "ERROR: Run this script on a Connection Broker server." -ForegroundColor Red
+    Write-Host "ERROR: Run this script on a Connection Broker server (RemoteDesktop module required)." -ForegroundColor Red
     exit 1
 }
 
@@ -38,7 +37,6 @@ $Html = @"
     <title>RDS Environment - Professional As-Built</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;500;600&display=swap');
-        
         body {
             font-family: 'Segoe UI', Arial, sans-serif;
             margin: 0;
@@ -107,75 +105,71 @@ $Html = @"
             color: #777;
             font-size: 0.95em;
         }
+        .warning { color: #d9534f; font-style: italic; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Remote Desktop Services (RDS)<br>As-Built Documentation</h1>
         <div class="header-info">
-            <p><strong>Generated:</strong> $(Get-Date -Format "MMMM dd, yyyy HH:mm") &nbsp;&nbsp;|&nbsp;&nbsp; 
+            <p><strong>Generated:</strong> $(Get-Date -Format "MMMM dd, yyyy HH:mm") &nbsp;&nbsp;|&nbsp;&nbsp;
                <strong>Server:</strong> $env:COMPUTERNAME</p>
         </div>
 "@
+Write-Log "HTML header generated."
 
-# 1. Deployment Overview
-$Deployment = Get-RDDeployment
+# 1. Deployment Overview (using Get-RDServer)
 $Html += @"
         <div class="section">
-            <h2>1. Deployment Overview</h2>
-            <table>
-                <tr><th>Property</th><th>Value</th></tr>
-"@
-if ($Deployment) {
-    $Deployment.PSObject.Properties | ForEach-Object {
-        $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
-    }
-}
-$Html += "</table></div>"
-
-# 2. RDS Servers & Roles
-$Html += @"
-        <div class="section">
-            <h2>2. RDS Servers and Roles</h2>
+            <h2>1. Deployment Overview (RDS Servers & Roles)</h2>
             <table>
                 <tr><th>Server Name</th><th>Roles</th></tr>
 "@
-Get-RDServer | ForEach-Object {
-    $Html += "<tr><td>$($_.Server)</td><td>$($_.Roles -join ', ')</td></tr>"
+try {
+    $Servers = Get-RDServer -ErrorAction Stop
+    foreach ($srv in $Servers) {
+        $roles = if ($srv.Roles) { $srv.Roles -join ', ' } else { "None" }
+        $Html += "<tr><td>$($srv.Server)</td><td>$roles</td></tr>"
+    }
+} catch {
+    $Html += "<tr><td colspan='2' class='warning'>Error retrieving servers: $($_.Exception.Message)</td></tr>"
 }
 $Html += "</table></div>"
 
-# 3. RD Gateway
+# 2. RD Gateway
 $Html += @"
         <div class="section">
-            <h2>3. RD Gateway Configuration</h2>
+            <h2>2. RD Gateway Configuration</h2>
 "@
-$Gateways = Get-RDGatewayServer
-if ($Gateways) {
-    foreach ($gw in $Gateways) {
-        $Html += "<h3>Gateway Server: $($gw.Server)</h3>"
+try {
+    $GatewayConfig = Get-RDDeploymentGatewayConfiguration -ErrorAction Stop
+    if ($GatewayConfig) {
+        $Html += "<h3>Gateway Settings</h3>"
         $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
-        $gw.PSObject.Properties | ForEach-Object {
-            $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+        $GatewayConfig.PSObject.Properties | Where-Object { $_.Name -notlike "PS*" } | ForEach-Object {
+            $val = if ($_.Value -is [array]) { $_.Value -join "; " } else { $_.Value }
+            $Html += "<tr><td>$($_.Name)</td><td>$val</td></tr>"
         }
         $Html += "</table>"
+    } else {
+        $Html += "<p>No RD Gateway configured or accessible.</p>"
     }
-} else {
-    $Html += "<p>No RD Gateway configured.</p>"
+} catch {
+    $Html += "<p class='warning'>Error retrieving Gateway config: $($_.Exception.Message)</p>"
 }
 $Html += "</div>"
 
-# 4. RD Web Access
+# 3. RD Web Access
 $Html += @"
         <div class="section">
-            <h2>4. Remote Desktop Web Access</h2>
+            <h2>3. Remote Desktop Web Access</h2>
 "@
-$WebServers = Get-RDServer | Where-Object { $_.Roles -like "*RD-Web-Access*" }
+$WebServers = $Servers | Where-Object { $_.Roles -like "*RD-Web-Access*" }
 if ($WebServers) {
     foreach ($wa in $WebServers) {
         $Html += "<h3>Web Access Server: $($wa.Server)</h3>"
         $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
-        $wa.PSObject.Properties | ForEach-Object {
+        $wa.PSObject.Properties | Where-Object { $_.Name -notlike "PS*" } | ForEach-Object {
             $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
         }
         $Html += "</table>"
@@ -185,55 +179,66 @@ if ($WebServers) {
 }
 $Html += "</div>"
 
-# 5. Session Collections
+# 4. Session Collections
 $Html += @"
         <div class="section">
-            <h2>5. RDS Session Collections & Assignments</h2>
+            <h2>4. RDS Session Collections & Assignments</h2>
 "@
-foreach ($col in Get-RDSessionCollection) {
-    $ColName = $col.CollectionName
-    $Config = Get-RDSessionCollectionConfiguration -CollectionName $ColName
-    $Groups = (Get-RDSessionCollectionConfiguration -CollectionName $ColName -UserGroup).UserGroup
+try {
+    $Collections = Get-RDSessionCollection -ErrorAction Stop
+    foreach ($col in $Collections) {
+        $ColName = $col.CollectionName
+        $Config = Get-RDSessionCollectionConfiguration -CollectionName $ColName -ErrorAction SilentlyContinue
+        $Groups = (Get-RDSessionCollectionConfiguration -CollectionName $ColName -UserGroup -ErrorAction SilentlyContinue).UserGroup
 
-    $Html += "<h3>Collection: $ColName</h3>"
-    $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
-    $Config.PSObject.Properties | Where-Object {$_.Name -notlike "*UserGroup*"} | ForEach-Object {
-        $val = if ($_.Value -is [array]) { $_.Value -join "; " } else { $_.Value }
-        $Html += "<tr><td>$($_.Name)</td><td>$val</td></tr>"
-    }
-    $Html += "</table>"
+        $Html += "<h3>Collection: $ColName</h3>"
+        if ($Config) {
+            $Html += "<table><tr><th>Property</th><th>Value</th></tr>"
+            $Config.PSObject.Properties | Where-Object { $_.Name -notlike "*UserGroup*" -and $_.Name -notlike "PS*" } | ForEach-Object {
+                $val = if ($_.Value -is [array]) { $_.Value -join "; " } else { $_.Value }
+                $Html += "<tr><td>$($_.Name)</td><td>$val</td></tr>"
+            }
+            $Html += "</table>"
+        }
 
-    $Html += "<h4>Assigned User Groups</h4><table><tr><th>Group Name</th></tr>"
-    if ($Groups) {
-        $Groups | ForEach-Object { $Html += "<tr><td>$_</td></tr>" }
-    } else {
-        $Html += "<tr><td>None</td></tr>"
+        $Html += "<h4>Assigned User Groups</h4><table><tr><th>Group Name</th></tr>"
+        if ($Groups) {
+            $Groups | ForEach-Object { $Html += "<tr><td>$_</td></tr>" }
+        } else {
+            $Html += "<tr><td>None</td></tr>"
+        }
+        $Html += "</table>"
     }
-    $Html += "</table>"
+} catch {
+    $Html += "<p class='warning'>Error retrieving collections: $($_.Exception.Message)</p>"
 }
 $Html += "</div>"
 
-# 6. FSLogix Profile Configuration
+# 5. FSLogix Profile Configuration
 $Html += @"
         <div class="section">
-            <h2>6. FSLogix Profile Disk Configuration</h2>
+            <h2>5. FSLogix Profile Disk Configuration</h2>
 "@
-$SessionHosts = (Get-RDSessionHost).SessionHost
+$SessionHosts = (Get-RDSessionHost -ErrorAction SilentlyContinue).SessionHost
+if (-not $SessionHosts) { $SessionHosts = @($env:COMPUTERNAME) }  # fallback
+
 foreach ($sh in $SessionHosts) {
     $Html += "<h3>Session Host: $sh</h3>"
-
-    $Profiles = Invoke-Command -ComputerName $sh -ScriptBlock {
-        Get-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" -ErrorAction SilentlyContinue
-    } -ErrorAction SilentlyContinue
-
-    if ($Profiles) {
-        $Html += "<table><tr><th>Setting</th><th>Value</th></tr>"
-        $Profiles.PSObject.Properties | Where-Object {$_.Name -notlike "PS*"} | ForEach-Object {
-            $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+    try {
+        $Profiles = Invoke-Command -ComputerName $sh -ScriptBlock {
+            Get-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" -ErrorAction SilentlyContinue
+        } -ErrorAction Stop
+        if ($Profiles) {
+            $Html += "<table><tr><th>Setting</th><th>Value</th></tr>"
+            $Profiles.PSObject.Properties | Where-Object { $_.Name -notlike "PS*" } | ForEach-Object {
+                $Html += "<tr><td>$($_.Name)</td><td>$($_.Value)</td></tr>"
+            }
+            $Html += "</table>"
+        } else {
+            $Html += "<p>No FSLogix Profiles configuration found on this host.</p>"
         }
-        $Html += "</table>"
-    } else {
-        $Html += "<p>No FSLogix Profiles configuration found.</p>"
+    } catch {
+        $Html += "<p class='warning'>Could not query FSLogix on $sh: $($_.Exception.Message)</p>"
     }
 }
 $Html += "</div>"
@@ -249,15 +254,14 @@ $Html += @"
 </html>
 "@
 
-# Save the Professional HTML Report
+# Save the Report
 $Html | Out-File -FilePath $HtmlPath -Encoding UTF8
 
-# Export CSVs for reference
+# Export CSVs
 Get-RDServer | Export-Csv "$ReportFolder\RDS_Servers.csv" -NoTypeInformation
-Get-RDSessionCollectionConfiguration | Export-Csv "$ReportFolder\Collection_Configs.csv" -NoTypeInformation
+Get-RDSessionCollectionConfiguration | Export-Csv "$ReportFolder\Collection_Configs.csv" -NoTypeInformation -ErrorAction SilentlyContinue
 
 Write-Log "Professional HTML As-Built report generated successfully!"
 Write-Host "`n✅ Professional RDS As-Built HTML report has been generated!" -ForegroundColor Green
 Write-Host "📁 Location: $HtmlPath" -ForegroundColor Cyan
-
 Invoke-Item $HtmlPath
